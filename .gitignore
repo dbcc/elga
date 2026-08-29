@@ -1,0 +1,13 @@
+/build/
+.vs/
+.vscode/
+.idea/
+*.log
+*.pdb
+*.ilk
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.DS_Store
+Thumbs.db

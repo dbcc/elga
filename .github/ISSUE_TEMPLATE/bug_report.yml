@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible crash, capture problem, or UI defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Hardware and negotiated mode details are essential for capture issues.
+  - type: input
+    id: revision
+    attributes:
+      label: Version or commit
+      description: Release tag, commit hash, or approximate download date.
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2, build 26100
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU and capture hardware
+      description: Include GPU, Elgato driver or firmware version, and USB port or connection type.
+      placeholder: RTX 4070; Elgato 4K X; USB 3.2 Gen 2
+    validations:
+      required: true
+  - type: input
+    id: mode
+    attributes:
+      label: Capture mode
+      description: Pixel format, resolution, refresh rate, and whether format or mode selection was automatic.
+      placeholder: Auto/NV12, 3840x2160 at 144 FPS
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start the viewer
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include exact error text, screenshots, or crash details when available.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I tested the newest available revision.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
