@@ -313,7 +313,7 @@ ui_init_state :: proc() {
 }
 
 ui_tick :: proc() {
-	wake_update(&app.wake)
+	wake_changed := wake_update(&app.wake)
 	now := time.now()
 	point: win32.POINT
 	win32.GetCursorPos(&point)
@@ -333,9 +333,9 @@ ui_tick :: proc() {
 			app.hover_started = {}
 		}
 	}
-	changed := app.controls_visible != visible
+	controls_changed := app.controls_visible != visible
 	app.controls_visible = visible
-	if changed && app.renderer.ready do renderer_draw(&app.renderer)
+	if (controls_changed || wake_changed) && app.renderer.ready do renderer_draw(&app.renderer)
 
 	when ELGA_FULLSCREEN_STRESS do fullscreen_stress_tick()
 	when ELGA_FORMAT_STRESS do format_stress_tick()

@@ -2,12 +2,19 @@ package main
 
 import "core:fmt"
 import "core:mem"
+import "core:os"
+import "core:path/filepath"
+import "core:strconv"
+import "core:strings"
 import "core:sync"
 import ma "vendor:miniaudio"
 
-MAX_AUDIO_OUTPUTS :: 64
-AUDIO_CHANNELS    :: 2
-AUDIO_SAMPLE_RATE :: 48_000
+MAX_AUDIO_OUTPUTS         :: 64
+AUDIO_CHANNELS            :: 2
+AUDIO_SAMPLE_RATE         :: 48_000
+AUDIO_VOLUME_DEFAULT      :: 100
+AUDIO_SETTINGS_FILE       :: "elga-camera.ini"
+AUDIO_SETTINGS_TEMP_FILE  :: "elga-camera.ini.tmp"
 
 Audio_Output :: struct {
 	id: ma.device_id,
@@ -22,6 +29,9 @@ Audio_State :: struct {
 	context_ready: bool,
 	device_ready: bool,
 	muted: u32,
+	volume_percent: u32,
+	settings_dirty: bool,
+	settings_save_failed: bool,
 	capture_id: ma.device_id,
 	capture_name: [ma.MAX_DEVICE_NAME_LENGTH + 1]u8,
 	capture_name_len: int,
@@ -32,6 +42,8 @@ Audio_State :: struct {
 
 audio_init :: proc(a: ^Audio_State) -> bool {
 	a.selected_output = -1
+	sync.atomic_store_explicit(&a.volume_percent, AUDIO_VOLUME_DEFAULT, .Relaxed)
+	audio_load_settings(a)
 	backends := [1]ma.backend{.wasapi}
 	config := ma.context_config_init()
 	if ma.context_init(raw_data(backends[:]), 1, &config, &a.ctx) != .SUCCESS {
@@ -124,11 +136,108 @@ audio_set_muted :: proc(a: ^Audio_State, muted: bool) {
 	sync.atomic_store_explicit(&a.muted, u32(1) if muted else u32(0), .Relaxed)
 }
 
-audio_is_muted :: proc(a: ^Audio_State) -> bool {
+audio_is_muted :: proc "contextless" (a: ^Audio_State) -> bool {
 	return sync.atomic_load_explicit(&a.muted, .Relaxed) != 0
 }
 
+audio_get_volume_percent :: proc "contextless" (a: ^Audio_State) -> u32 {
+	return sync.atomic_load_explicit(&a.volume_percent, .Relaxed)
+}
+
+audio_set_volume_percent :: proc(a: ^Audio_State, percent: u32) {
+	clamped_percent := min(percent, u32(100))
+	if audio_get_volume_percent(a) == clamped_percent do return
+	sync.atomic_store_explicit(&a.volume_percent, clamped_percent, .Relaxed)
+	audio_set_muted(a, false)
+	a.settings_dirty = true
+}
+
+audio_settings_save_failed :: proc(a: ^Audio_State) -> bool {
+	return a.settings_save_failed
+}
+
+audio_load_settings :: proc(a: ^Audio_State) -> bool {
+	path, _, paths_ok := audio_settings_paths()
+	if !paths_ok do return false
+	data, read_error := os.read_entire_file(path, context.temp_allocator)
+	if read_error != nil do return false
+	percent, parsed := audio_parse_volume_settings(string(data))
+	if !parsed do return false
+	sync.atomic_store_explicit(&a.volume_percent, percent, .Relaxed)
+	a.settings_dirty = false
+	a.settings_save_failed = false
+	return true
+}
+
+audio_save_settings :: proc(a: ^Audio_State) -> bool {
+	if !a.settings_dirty do return !a.settings_save_failed
+	path, temp_path, paths_ok := audio_settings_paths()
+	if !paths_ok {
+		a.settings_save_failed = true
+		return false
+	}
+	if !audio_write_volume_settings(path, temp_path, audio_get_volume_percent(a)) {
+		a.settings_save_failed = true
+		return false
+	}
+	a.settings_dirty = false
+	a.settings_save_failed = false
+	return true
+}
+
+audio_settings_paths :: proc() -> (path, temp_path: string, ok: bool) {
+	directory, directory_error := os.get_executable_directory(context.temp_allocator)
+	if directory_error != nil do return "", "", false
+	settings_path, path_error := filepath.join([]string{directory, AUDIO_SETTINGS_FILE}, context.temp_allocator)
+	if path_error != nil do return "", "", false
+	settings_temp_path, temp_path_error := filepath.join([]string{directory, AUDIO_SETTINGS_TEMP_FILE}, context.temp_allocator)
+	if temp_path_error != nil do return "", "", false
+	return settings_path, settings_temp_path, true
+}
+
+audio_write_volume_settings :: proc(path, temp_path: string, percent: u32) -> bool {
+	buffer: [64]byte
+	settings := audio_format_volume_settings(buffer[:], percent)
+	if os.write_entire_file(temp_path, settings) != nil {
+		_ = os.remove(temp_path)
+		return false
+	}
+	if os.rename(temp_path, path) != nil {
+		_ = os.remove(temp_path)
+		return false
+	}
+	return true
+}
+
+audio_format_volume_settings :: proc(buffer: []byte, percent: u32) -> string {
+	return fmt.bprintf(buffer, "[audio]\r\nvolume_percent=%d\r\n", min(percent, u32(100)))
+}
+
+audio_parse_volume_settings :: proc(data: string) -> (percent: u32, ok: bool) {
+	in_audio_section := false
+	remaining := data
+	for line in strings.split_lines_iterator(&remaining) {
+		trimmed_line := strings.trim_space(line)
+		if len(trimmed_line) == 0 || trimmed_line[0] == ';' || trimmed_line[0] == '#' do continue
+		if trimmed_line[0] == '[' {
+			in_audio_section = trimmed_line == "[audio]"
+			continue
+		}
+		if !in_audio_section do continue
+		equals := strings.index_byte(trimmed_line, '=')
+		if equals < 0 do continue
+		key := strings.trim_space(trimmed_line[:equals])
+		if key != "volume_percent" do continue
+		value := strings.trim_space(trimmed_line[equals+1:])
+		parsed, valid := strconv.parse_int(value, 10)
+		if !valid || parsed < 0 || parsed > 100 do return AUDIO_VOLUME_DEFAULT, false
+		return u32(parsed), true
+	}
+	return AUDIO_VOLUME_DEFAULT, false
+}
+
 audio_destroy :: proc(a: ^Audio_State) {
+	if a.settings_dirty do audio_save_settings(a)
 	audio_close_device(a)
 	if a.context_ready {
 		ma.context_uninit(&a.ctx)
@@ -145,13 +254,34 @@ audio_close_device :: proc(a: ^Audio_State) {
 
 audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {
 	if output == nil do return
-	byte_count := int(frame_count) * AUDIO_CHANNELS * size_of(f32)
+	sample_count := int(frame_count) * AUDIO_CHANNELS
 	a := cast(^Audio_State)device.pUserData
-	if input == nil || a == nil || sync.atomic_load_explicit(&a.muted, .Relaxed) != 0 {
-		mem.zero(output, byte_count)
+	if input == nil || a == nil {
+		mem.zero(output, sample_count*size_of(f32))
 		return
 	}
-	mem.copy_non_overlapping(output, input, byte_count)
+	output_samples := (cast([^]f32)output)[:sample_count]
+	input_samples := (cast([^]f32)input)[:sample_count]
+	audio_apply_volume_samples(
+		output_samples,
+		input_samples,
+		audio_get_volume_percent(a),
+		audio_is_muted(a),
+	)
+}
+
+audio_apply_volume_samples :: proc "contextless" (output, input: []f32, volume_percent: u32, muted: bool) {
+	sample_count := min(len(output), len(input))
+	if muted || volume_percent == 0 {
+		mem.zero(raw_data(output[:sample_count]), sample_count*size_of(f32))
+		return
+	}
+	if volume_percent >= 100 {
+		mem.copy_non_overlapping(raw_data(output[:sample_count]), raw_data(input[:sample_count]), sample_count*size_of(f32))
+		return
+	}
+	gain := f32(volume_percent)/100.0
+	for i in 0..<sample_count do output[i] = input[i]*gain
 }
 
 copy_device_name :: proc(dst: ^[ma.MAX_DEVICE_NAME_LENGTH + 1]u8, src: ^[ma.MAX_DEVICE_NAME_LENGTH + 1]u8) -> int {

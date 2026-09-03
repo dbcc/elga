@@ -11,8 +11,10 @@ Notable changes to Elga Camera are documented here. The project follows
 - GPU-native NV12, P010, and YUY2 capture paths.
 - I420, RGB24, and MJPEG compatibility paths.
 - Low-latency HDMI audio monitoring.
+- Persistent 0–100% software volume control in a hover flyout on the audio
+  button. Changing the volume automatically clears mute.
 - Custom title bar and borderless fullscreen controls.
-- Background Nintendo Switch 2 wake control using Odin's libcurl bindings.
+- Online-aware Nintendo Switch 2 wake control using Odin's libcurl bindings.
 
 ### Performance
 

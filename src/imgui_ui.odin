@@ -14,6 +14,9 @@ TITLE_BAR_HEIGHT        :: 42.0
 TITLE_BAR_DRAG_WIDTH    :: 72.0
 TITLE_BAR_BUTTON_WIDTH  :: 40.0
 TITLE_BAR_ITEM_SPACING  :: 6.0
+AUDIO_VOLUME_HOVER_DELAY :: 0.30
+AUDIO_VOLUME_LEAVE_DELAY :: 0.25
+AUDIO_VOLUME_FLYOUT_WIDTH :: 220.0
 
 Control_Icon :: enum {
 	Fullscreen,
@@ -35,6 +38,11 @@ TITLE_BAR_WINDOW_FLAGS :: imgui.WindowFlags_NoDecoration | imgui.WindowFlags {
 	.NoNavInputs, .NoNavFocus, .NoDocking,
 }
 
+AUDIO_VOLUME_WINDOW_FLAGS :: imgui.WindowFlags_NoDecoration | imgui.WindowFlags {
+	.NoMove, .NoSavedSettings, .NoFocusOnAppearing,
+	.NoNavFocus, .NoDocking,
+}
+
 ImGui_State :: struct {
 	ready: bool,
 	menu_open: bool,
@@ -44,6 +52,9 @@ ImGui_State :: struct {
 	dpi_scale: f32,
 	font: ^imgui.Font,
 	font_size: f32,
+	audio_volume_open: bool,
+	audio_hover_started: f64,
+	audio_leave_started: f64,
 }
 
 imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
@@ -133,6 +144,9 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	ui.menu_open = false
 	if app.controls_visible {
 		s := ui.dpi_scale
+		audio_button_hovered := false
+		audio_output_menu_open := false
+		audio_button_min, audio_button_max: imgui.Vec2
 		logical_width := f32(r.width)/s
 		compact := logical_width < 520
 		imgui.PushStyleVar(.WindowRounding, 0)
@@ -169,9 +183,28 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui.SameLine()
 		muted := audio_is_muted(&app.audio)
 		if icon_button(ui, "##audio", .Muted if muted else .Audio, muted) do post_ui_action(.Audio)
-		imgui.SetItemTooltipUnformatted("Left-click: mute. Right-click: select output device")
+		audio_button_hovered = imgui.IsItemHovered()
+		audio_button_min = imgui.GetItemRectMin()
+		audio_button_max = imgui.GetItemRectMax()
+		now := imgui.GetTime()
+		if audio_button_hovered {
+			ui.audio_leave_started = 0
+			if !ui.audio_volume_open {
+				if ui.audio_hover_started == 0 do ui.audio_hover_started = now
+				if now-ui.audio_hover_started >= AUDIO_VOLUME_HOVER_DELAY do ui.audio_volume_open = true
+			}
+		} else if !ui.audio_volume_open {
+			ui.audio_hover_started = 0
+		}
+		if !ui.audio_volume_open {
+			imgui.SetItemTooltipUnformatted("Left-click: mute. Right-click: select output device")
+		}
 		if imgui.BeginPopupContextItem("audio_outputs", imgui.PopupFlags_MouseButtonRight) {
 			ui.menu_open = true
+			audio_output_menu_open = true
+			ui.audio_volume_open = false
+			ui.audio_hover_started = 0
+			ui.audio_leave_started = 0
 			if imgui.Selectable("Windows default output", app.audio.selected_output < 0) {
 				post_ui_action(.Output, 0)
 			}
@@ -185,30 +218,14 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		}
 		imgui.SameLine()
 		wake_status := wake_get_status(&app.wake)
-		if icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success) do post_ui_action(.Wake)
-		switch wake_status {
-		case .Unavailable:
-			if wake_get_error(&app.wake) == .Curl_Global_Init {
-				imgui.SetItemTooltipUnformatted("Switch wake is unavailable: libcurl initialization failed")
-			} else {
-				imgui.SetItemTooltipUnformatted("Switch wake is unavailable")
-			}
-		case .Sending:     imgui.SetItemTooltipUnformatted("Sending Switch 2 wake request...")
-		case .Success:     imgui.SetItemTooltipUnformatted("Switch 2 wake request sent")
-		case .Failed:
-			switch wake_get_error(&app.wake) {
-			case .Thread_Create:  imgui.SetItemTooltipUnformatted("Switch wake failed: could not create worker thread")
-			case .Curl_Easy_Init: imgui.SetItemTooltipUnformatted("Switch wake failed: could not create curl request")
-			case .Curl_Setup:     imgui.SetItemTooltipUnformatted("Switch wake failed: could not configure curl")
-			case .Resolve:        imgui.SetItemTooltipUnformatted("Switch wake failed: could not resolve switch2-waker.local")
-			case .Connect:        imgui.SetItemTooltipUnformatted("Switch wake failed: beacon refused the connection")
-			case .Timeout:        imgui.SetItemTooltipUnformatted("Switch wake failed: beacon timed out")
-			case .Http:           imgui.SetItemTooltip("Switch wake failed: beacon returned HTTP %u", wake_get_http_status(&app.wake))
-			case .Cancelled:      imgui.SetItemTooltipUnformatted("Switch wake request was cancelled")
-			case .None, .Curl_Global_Init, .Transfer:
-				imgui.SetItemTooltipUnformatted("Switch wake failed during transfer")
-			}
-		case .Idle:        imgui.SetItemTooltipUnformatted("Wake Nintendo Switch 2")
+		wake_online := wake_is_online(&app.wake)
+		wake_disabled := !wake_online || wake_status == .Sending
+		imgui.BeginDisabled(wake_disabled)
+		wake_clicked := icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success)
+		imgui.EndDisabled()
+		if wake_clicked do post_ui_action(.Wake)
+		if imgui.IsItemHovered(imgui.HoveredFlags_ForTooltip | imgui.HoveredFlags_AllowWhenDisabled) {
+			wake_set_tooltip(&app.wake, wake_status, wake_online)
 		}
 
 		if !compact {
@@ -305,6 +322,103 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui.End()
 		imgui.PopStyleColor(5)
 		imgui.PopStyleVar(2)
+
+		if ui.audio_volume_open && !audio_output_menu_open {
+			audio_volume_flyout(ui, audio_button_min, audio_button_max, audio_button_hovered)
+		}
+	} else {
+		ui.audio_volume_open = false
+		ui.audio_hover_started = 0
+		ui.audio_leave_started = 0
+	}
+}
+
+audio_volume_flyout :: proc(ui: ^ImGui_State, button_min, button_max: imgui.Vec2, button_hovered: bool) {
+	s := ui.dpi_scale
+	ui.menu_open = true
+	height := f32(76)*s
+	if audio_settings_save_failed(&app.audio) do height = 112*s
+	imgui.PushStyleVar(.WindowRounding, 0)
+	imgui.PushStyleVar(.WindowBorderSize, 1*s)
+	imgui.PushStyleVar(.FrameRounding, 0)
+	imgui.PushStyleVar(.GrabRounding, 0)
+	imgui.PushStyleColorImVec4(.WindowBg, {0.018, 0.018, 0.018, 1})
+	imgui.PushStyleColorImVec4(.Border, {0.28, 0.29, 0.31, 1})
+	imgui.PushStyleColorImVec4(.Text, {0.82, 0.84, 0.87, 1})
+	imgui.PushStyleColorImVec4(.FrameBg, {0.07, 0.07, 0.07, 1})
+	imgui.PushStyleColorImVec4(.FrameBgHovered, {0.13, 0.13, 0.13, 1})
+	imgui.PushStyleColorImVec4(.FrameBgActive, {0.20, 0.20, 0.20, 1})
+	imgui.PushStyleColorImVec4(.SliderGrab, {0.58, 0.60, 0.63, 1})
+	imgui.PushStyleColorImVec4(.SliderGrabActive, {0.82, 0.84, 0.87, 1})
+	imgui.SetNextWindowPos({button_min.x, button_max.y+4*s}, .Always)
+	imgui.SetNextWindowSize({AUDIO_VOLUME_FLYOUT_WIDTH*s, height}, .Always)
+	imgui.Begin("##audio_volume_flyout", nil, AUDIO_VOLUME_WINDOW_FLAGS)
+	imgui.TextUnformatted("Volume")
+	imgui.SetNextItemWidth(-1)
+	volume := i32(audio_get_volume_percent(&app.audio))
+	if imgui.SliderInt("##audio_volume", &volume, 0, 100, "%d%%", imgui.SliderFlags_AlwaysClamp) {
+		audio_set_volume_percent(&app.audio, u32(volume))
+	}
+	slider_active := imgui.IsItemActive()
+	if imgui.IsItemDeactivatedAfterEdit() do audio_save_settings(&app.audio)
+	if audio_settings_save_failed(&app.audio) {
+		imgui.TextWrappedUnformatted("Volume could not be saved beside Elga")
+	}
+	flyout_hovered := imgui.IsWindowHovered()
+	imgui.End()
+	imgui.PopStyleColor(8)
+	imgui.PopStyleVar(4)
+
+	now := imgui.GetTime()
+	if button_hovered || flyout_hovered || slider_active {
+		ui.audio_leave_started = 0
+		return
+	}
+	if ui.audio_leave_started == 0 do ui.audio_leave_started = now
+	if now-ui.audio_leave_started >= AUDIO_VOLUME_LEAVE_DELAY {
+		ui.audio_volume_open = false
+		ui.audio_hover_started = 0
+		ui.audio_leave_started = 0
+	}
+}
+
+wake_set_tooltip :: proc(w: ^Wake_Control, status: Wake_Status, online: bool) {
+	if !online {
+		if !wake_health_was_checked(w) {
+			imgui.SetTooltipUnformatted("Checking Switch 2 wake beacon...")
+			return
+		}
+		switch wake_get_health_error(w) {
+		case .Resolve:        imgui.SetTooltipUnformatted("Wake unavailable: could not resolve switch2-waker.local")
+		case .Connect:        imgui.SetTooltipUnformatted("Wake unavailable: beacon is offline")
+		case .Timeout:        imgui.SetTooltipUnformatted("Wake unavailable: beacon timed out")
+		case .Http:           imgui.SetTooltip("Wake unavailable: beacon returned HTTP %u", wake_get_health_http_status(w))
+		case .Curl_Global_Init: imgui.SetTooltipUnformatted("Wake unavailable: libcurl initialization failed")
+		case .Health_Monitor_Init: imgui.SetTooltipUnformatted("Wake unavailable: health monitor could not start")
+		case .Curl_Easy_Init, .Curl_Setup, .Thread_Create, .Cancelled, .Transfer, .None:
+			imgui.SetTooltipUnformatted("Wake unavailable: beacon health check failed")
+		}
+		return
+	}
+
+	switch status {
+	case .Unavailable: imgui.SetTooltipUnformatted("Switch wake is unavailable")
+	case .Idle:        imgui.SetTooltipUnformatted("Wake Nintendo Switch 2")
+	case .Sending:     imgui.SetTooltipUnformatted("Sending Switch 2 wake request...")
+	case .Success:     imgui.SetTooltipUnformatted("Switch 2 wake request sent")
+	case .Failed:
+		switch wake_get_error(w) {
+		case .Thread_Create:  imgui.SetTooltipUnformatted("Switch wake failed: could not create worker thread")
+		case .Curl_Easy_Init: imgui.SetTooltipUnformatted("Switch wake failed: could not create curl request")
+		case .Curl_Setup:     imgui.SetTooltipUnformatted("Switch wake failed: could not configure curl")
+		case .Resolve:        imgui.SetTooltipUnformatted("Switch wake failed: could not resolve switch2-waker.local")
+		case .Connect:        imgui.SetTooltipUnformatted("Switch wake failed: beacon refused the connection")
+		case .Timeout:        imgui.SetTooltipUnformatted("Switch wake failed: beacon timed out")
+		case .Http:           imgui.SetTooltip("Switch wake failed: beacon returned HTTP %u", wake_get_http_status(w))
+		case .Cancelled:      imgui.SetTooltipUnformatted("Switch wake request was cancelled")
+		case .None, .Curl_Global_Init, .Health_Monitor_Init, .Transfer:
+			imgui.SetTooltipUnformatted("Switch wake failed during transfer")
+		}
 	}
 }
 

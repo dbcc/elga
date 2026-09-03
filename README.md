@@ -17,7 +17,8 @@ and it builds as one standalone executable.
 - Selectable native 16:9 resolutions with the highest exposed FPS per size.
 - Driver-native color conversion using the 4K X's native YUV sample encoding,
   with no app-level color adjustment or capture-card range changes.
-- Low-latency HDMI audio monitoring with selectable Windows output devices.
+- Low-latency HDMI audio monitoring with software volume, mute, and selectable
+  Windows output devices.
 - One-click Nintendo Switch 2 wake control through a networked ESPHome wake
   beacon available as `switch2-waker.local`.
 - Custom client-rendered title bar, borderless fullscreen, always-on-top,
@@ -76,9 +77,14 @@ and hardware behavior is recorded with each release.
 - Click **Pin position** to lock the current window position.
 - Click **Always on top** to keep the viewer above other windows.
 - Left-click the audio button to mute or unmute HDMI audio.
+- Hover over the audio button for about 300 ms to open the 0–100% software
+  volume slider. The selected volume is saved in `elga-camera.ini` beside the
+  executable. Changing the slider automatically unmutes audio; mute itself is
+  session-only and is not saved.
 - Right-click the audio button to select a Windows output device.
 - Click the power button to ask `switch2-waker.local` to wake the Nintendo
-  Switch 2. The request runs in the background and does not stall video.
+  Switch 2. The request runs in the background and does not stall video. The
+  button is enabled only while the ESPHome wake entity is reachable.
 - Click **Color** to use Auto or choose NV12 (8-bit 4:2:0), P010 (10-bit
   4:2:0), YUY2 (8-bit 4:2:2), I420, RGB24, or MJPEG. I420 and MJPEG use NV12;
   RGB24 is expanded to GPU-compatible 32-bit RGB without a YUV conversion.
@@ -127,8 +133,9 @@ video-range bytes as full-range bytes.
 Dear ImGui renders the custom title bar through its D3D11 backend and is
 skipped completely while that bar is hidden in fullscreen.
 
-Audio uses Miniaudio's WASAPI backend in low-latency full-duplex mode. Frame-local
-Odin allocations use a fixed 64 KiB arena that is reset after every frame.
+Audio uses Miniaudio's WASAPI backend in low-latency full-duplex mode. Volume is
+applied as linear software attenuation in the real-time callback. Frame-local Odin
+allocations use a fixed 64 KiB arena that is reset after every frame.
 
 ## Source layout
 
