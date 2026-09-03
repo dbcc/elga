@@ -12,6 +12,7 @@ Notable changes to Elga Camera are documented here. The project follows
 - I420, RGB24, and MJPEG compatibility paths.
 - Low-latency HDMI audio monitoring.
 - Custom title bar and borderless fullscreen controls.
+- Background Nintendo Switch 2 wake control using Odin's libcurl bindings.
 
 ### Performance
 

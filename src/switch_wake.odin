@@ -1,0 +1,171 @@
+package main
+
+import c "core:c/libc"
+import "core:fmt"
+import "core:sync"
+import "core:thread"
+import curl "vendor:curl"
+
+SWITCH_WAKE_URL :: cstring("http://switch2-waker.local/button/Wake%20Switch%202/press")
+
+Wake_Status :: enum u32 {
+	Unavailable,
+	Idle,
+	Sending,
+	Success,
+	Failed,
+}
+
+Wake_Error :: enum u32 {
+	None,
+	Curl_Global_Init,
+	Thread_Create,
+	Curl_Easy_Init,
+	Curl_Setup,
+	Resolve,
+	Connect,
+	Timeout,
+	Http,
+	Cancelled,
+	Transfer,
+}
+
+Wake_Control :: struct {
+	initialized:     bool,
+	request_thread:  ^thread.Thread,
+	status:          u32,
+	error:           u32,
+	http_status:     u32,
+	cancel_requested: u32,
+}
+
+wake_init :: proc(w: ^Wake_Control) -> bool {
+	if curl.global_init(curl.GLOBAL_DEFAULT) != .E_OK {
+		fmt.eprintln("Switch wake: could not initialize libcurl")
+		wake_set_result(w, .Unavailable, .Curl_Global_Init)
+		return false
+	}
+	w.initialized = true
+	wake_set_result(w, .Idle, .None)
+	return true
+}
+
+wake_destroy :: proc(w: ^Wake_Control) {
+	if w.request_thread != nil {
+		sync.atomic_store_explicit(&w.cancel_requested, 1, .Release)
+		thread.join(w.request_thread)
+		thread.destroy(w.request_thread)
+		w.request_thread = nil
+	}
+	if w.initialized {
+		curl.global_cleanup()
+		w.initialized = false
+	}
+	wake_set_result(w, .Unavailable, .None)
+}
+
+wake_update :: proc(w: ^Wake_Control) {
+	if w.request_thread == nil || wake_get_status(w) == .Sending do return
+	thread.join(w.request_thread)
+	thread.destroy(w.request_thread)
+	w.request_thread = nil
+}
+
+wake_request :: proc(w: ^Wake_Control) {
+	if !w.initialized || w.request_thread != nil do return
+	sync.atomic_store_explicit(&w.cancel_requested, 0, .Release)
+	wake_set_result(w, .Sending, .None)
+	w.request_thread = thread.create(wake_request_thread_proc, .Normal, "switch-wake")
+	if w.request_thread == nil {
+		wake_set_result(w, .Failed, .Thread_Create)
+		fmt.eprintln("Switch wake: could not create request thread")
+		return
+	}
+	w.request_thread.data = w
+	thread.start(w.request_thread)
+}
+
+wake_get_status :: proc(w: ^Wake_Control) -> Wake_Status {
+	return Wake_Status(sync.atomic_load_explicit(&w.status, .Acquire))
+}
+
+wake_get_error :: proc(w: ^Wake_Control) -> Wake_Error {
+	return Wake_Error(sync.atomic_load_explicit(&w.error, .Acquire))
+}
+
+wake_get_http_status :: proc(w: ^Wake_Control) -> u32 {
+	return sync.atomic_load_explicit(&w.http_status, .Acquire)
+}
+
+wake_set_result :: proc(w: ^Wake_Control, status: Wake_Status, error: Wake_Error, http_status: u32 = 0) {
+	sync.atomic_store_explicit(&w.http_status, http_status, .Relaxed)
+	sync.atomic_store_explicit(&w.error, u32(error), .Relaxed)
+	sync.atomic_store_explicit(&w.status, u32(status), .Release)
+}
+
+wake_request_thread_proc :: proc(t: ^thread.Thread) {
+	w := cast(^Wake_Control)t.data
+	if w == nil do return
+	succeeded := false
+	error := Wake_Error.Transfer
+	http_status: u32
+	defer wake_set_result(w, .Success if succeeded else .Failed, .None if succeeded else error, http_status)
+
+	easy := curl.easy_init()
+	if easy == nil {
+		error = .Curl_Easy_Init
+		fmt.eprintln("Switch wake: could not create curl request")
+		return
+	}
+	defer curl.easy_cleanup(easy)
+
+	options_ok := curl.easy_setopt(easy, .URL, SWITCH_WAKE_URL) == .E_OK &&
+		curl.easy_setopt(easy, .POST, c.long(1)) == .E_OK &&
+		curl.easy_setopt(easy, .POSTFIELDSIZE, c.long(0)) == .E_OK &&
+		curl.easy_setopt(easy, .CONNECTTIMEOUT_MS, c.long(5000)) == .E_OK &&
+		curl.easy_setopt(easy, .TIMEOUT_MS, c.long(8000)) == .E_OK &&
+		curl.easy_setopt(easy, .NOSIGNAL, c.long(1)) == .E_OK &&
+		curl.easy_setopt(easy, .FAILONERROR, c.long(1)) == .E_OK &&
+		curl.easy_setopt(easy, .NOPROGRESS, c.long(0)) == .E_OK &&
+		curl.easy_setopt(easy, .XFERINFOFUNCTION, wake_cancel_transfer) == .E_OK &&
+		curl.easy_setopt(easy, .XFERINFODATA, w) == .E_OK &&
+		curl.easy_setopt(easy, .WRITEFUNCTION, wake_discard_response) == .E_OK
+	if !options_ok {
+		error = .Curl_Setup
+		fmt.eprintln("Switch wake: could not configure curl request")
+		return
+	}
+
+	result := curl.easy_perform(easy)
+	response_code: c.long
+	info_result := curl.easy_getinfo(easy, .RESPONSE_CODE, &response_code)
+	if response_code > 0 do http_status = u32(response_code)
+	succeeded = result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300
+	if !succeeded {
+		#partial switch result {
+		case .E_COULDNT_RESOLVE_PROXY, .E_COULDNT_RESOLVE_HOST: error = .Resolve
+		case .E_COULDNT_CONNECT:                              error = .Connect
+		case .E_OPERATION_TIMEDOUT:                           error = .Timeout
+		case .E_HTTP_RETURNED_ERROR:                          error = .Http
+		case .E_ABORTED_BY_CALLBACK:                          error = .Cancelled
+		case .E_OK:
+			error = .Http if info_result == .E_OK else .Transfer
+		case: error = .Transfer
+		}
+	}
+	if succeeded {
+		fmt.eprintln("Switch wake: request sent")
+	} else {
+		fmt.eprintf("Switch wake: request failed (%s, HTTP %d)\n", curl.easy_strerror(result), response_code)
+	}
+}
+
+wake_cancel_transfer :: proc "c" (userdata: rawptr, download_total, download_now, upload_total, upload_now: curl.off_t) -> c.int {
+	w := cast(^Wake_Control)userdata
+	if w != nil && sync.atomic_load_explicit(&w.cancel_requested, .Acquire) != 0 do return 1
+	return 0
+}
+
+wake_discard_response :: proc "c" (buffer: [^]byte, size, count: c.size_t, userdata: rawptr) -> c.size_t {
+	return size*count
+}

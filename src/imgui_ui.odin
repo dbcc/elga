@@ -21,6 +21,7 @@ Control_Icon :: enum {
 	Topmost,
 	Audio,
 	Muted,
+	Wake,
 	Color,
 	Mode,
 	Minimize,
@@ -169,7 +170,6 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		muted := audio_is_muted(&app.audio)
 		if icon_button(ui, "##audio", .Muted if muted else .Audio, muted) do post_ui_action(.Audio)
 		imgui.SetItemTooltipUnformatted("Left-click: mute. Right-click: select output device")
-
 		if imgui.BeginPopupContextItem("audio_outputs", imgui.PopupFlags_MouseButtonRight) {
 			ui.menu_open = true
 			if imgui.Selectable("Windows default output", app.audio.selected_output < 0) {
@@ -182,6 +182,33 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 				}
 			}
 			imgui.EndPopup()
+		}
+		imgui.SameLine()
+		wake_status := wake_get_status(&app.wake)
+		if icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success) do post_ui_action(.Wake)
+		switch wake_status {
+		case .Unavailable:
+			if wake_get_error(&app.wake) == .Curl_Global_Init {
+				imgui.SetItemTooltipUnformatted("Switch wake is unavailable: libcurl initialization failed")
+			} else {
+				imgui.SetItemTooltipUnformatted("Switch wake is unavailable")
+			}
+		case .Sending:     imgui.SetItemTooltipUnformatted("Sending Switch 2 wake request...")
+		case .Success:     imgui.SetItemTooltipUnformatted("Switch 2 wake request sent")
+		case .Failed:
+			switch wake_get_error(&app.wake) {
+			case .Thread_Create:  imgui.SetItemTooltipUnformatted("Switch wake failed: could not create worker thread")
+			case .Curl_Easy_Init: imgui.SetItemTooltipUnformatted("Switch wake failed: could not create curl request")
+			case .Curl_Setup:     imgui.SetItemTooltipUnformatted("Switch wake failed: could not configure curl")
+			case .Resolve:        imgui.SetItemTooltipUnformatted("Switch wake failed: could not resolve switch2-waker.local")
+			case .Connect:        imgui.SetItemTooltipUnformatted("Switch wake failed: beacon refused the connection")
+			case .Timeout:        imgui.SetItemTooltipUnformatted("Switch wake failed: beacon timed out")
+			case .Http:           imgui.SetItemTooltip("Switch wake failed: beacon returned HTTP %u", wake_get_http_status(&app.wake))
+			case .Cancelled:      imgui.SetItemTooltipUnformatted("Switch wake request was cancelled")
+			case .None, .Curl_Global_Init, .Transfer:
+				imgui.SetItemTooltipUnformatted("Switch wake failed during transfer")
+			}
+		case .Idle:        imgui.SetItemTooltipUnformatted("Wake Nintendo Switch 2")
 		}
 
 		if !compact {
@@ -350,6 +377,10 @@ draw_control_icon :: proc(draw: ^imgui.DrawList, icon: Control_Icon, min, max: i
 			imgui.DrawList_PathArcTo(draw, {c.x+1*s, c.y}, 12*s, -0.65, 0.65, 8)
 			imgui.DrawList_PathStroke(draw, color, stroke)
 		}
+	case .Wake:
+		imgui.DrawList_PathArcTo(draw, c, 9*s, -0.75, 3.89, 20)
+		imgui.DrawList_PathStroke(draw, color, stroke)
+		imgui.DrawList_AddLine(draw, {c.x, c.y-11*s}, {c.x, c.y-1*s}, color, stroke)
 	case .Color:
 		red := imgui.ColorConvertFloat4ToU32({0.95, 0.30, 0.27, 1})
 		green := imgui.ColorConvertFloat4ToU32({0.30, 0.85, 0.48, 1})

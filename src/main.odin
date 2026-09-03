@@ -26,6 +26,7 @@ UI_Action :: enum u32 {
 	Pin,
 	Topmost,
 	Audio,
+	Wake,
 	Minimize,
 	Maximize,
 	Close,
@@ -42,6 +43,7 @@ App :: struct {
 	always_on_top: bool,
 	renderer:      Renderer,
 	audio:         Audio_State,
+	wake:          Wake_Control,
 	ui:            ImGui_State,
 	frame_arena:   mem.Arena,
 	frame_memory:  [FRAME_ARENA_SIZE]byte,
@@ -133,6 +135,7 @@ main :: proc() {
 	}
 	ui_init_state()
 	audio_init(&app.audio)
+	wake_init(&app.wake)
 	win32.SetTimer(hwnd, UI_TIMER, 100, nil)
 
 	win32.ShowWindow(hwnd, win32.SW_SHOW)
@@ -147,6 +150,7 @@ main :: proc() {
 		win32.DispatchMessageW(&msg)
 	}
 
+	wake_destroy(&app.wake)
 	audio_destroy(&app.audio)
 	imgui_ui_destroy(&app.ui)
 	renderer_destroy(&app.renderer)
@@ -249,7 +253,7 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		}
 		dpi_scale := max(f32(win32.GetDpiForWindow(hwnd))/f32(win32.USER_DEFAULT_SCREEN_DPI), 1.0)
 		logical_width := f32(client.right)/dpi_scale
-		control_count := 2 if logical_width < 520 else 6
+		control_count := 3 if logical_width < 520 else 7
 		controls_end := (TITLE_BAR_DRAG_WIDTH + f32(control_count)*UI_ICON_BUTTON_SIZE + f32(control_count-1)*TITLE_BAR_ITEM_SPACING)*dpi_scale
 		window_buttons_start := f32(client.right) - 3*TITLE_BAR_BUTTON_WIDTH*dpi_scale
 		in_drag_region := f32(point.x) < TITLE_BAR_DRAG_WIDTH*dpi_scale ||
@@ -309,6 +313,7 @@ ui_init_state :: proc() {
 }
 
 ui_tick :: proc() {
+	wake_update(&app.wake)
 	now := time.now()
 	point: win32.POINT
 	win32.GetCursorPos(&point)
@@ -357,6 +362,8 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 		win32.SetWindowPos(app.hwnd, target, 0, 0, 0, 0, win32.SWP_NOMOVE | win32.SWP_NOSIZE | win32.SWP_NOACTIVATE)
 	case .Audio:
 		audio_set_muted(&app.audio, !audio_is_muted(&app.audio))
+	case .Wake:
+		wake_request(&app.wake)
 	case .Minimize:
 		win32.ShowWindow(app.hwnd, win32.SW_MINIMIZE)
 	case .Maximize:

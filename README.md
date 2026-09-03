@@ -18,6 +18,8 @@ and it builds as one standalone executable.
 - Driver-native color conversion using the 4K X's native YUV sample encoding,
   with no app-level color adjustment or capture-card range changes.
 - Low-latency HDMI audio monitoring with selectable Windows output devices.
+- One-click Nintendo Switch 2 wake control through a networked ESPHome wake
+  beacon available as `switch2-waker.local`.
 - Custom client-rendered title bar, borderless fullscreen, always-on-top,
   position pinning, and 16:9 resizing.
 - DPI-aware scalable text and crisp vector icon controls.
@@ -43,8 +45,8 @@ From PowerShell:
 .\build.ps1
 ```
 
-The optimized executable is written to `build/elga-camera.exe`. For a debug
-build, run:
+The optimized executable and required third-party notices are written to
+`build/`. For a debug build, run:
 
 ```powershell
 .\build.ps1 -Configuration Debug
@@ -75,6 +77,8 @@ and hardware behavior is recorded with each release.
 - Click **Always on top** to keep the viewer above other windows.
 - Left-click the audio button to mute or unmute HDMI audio.
 - Right-click the audio button to select a Windows output device.
+- Click the power button to ask `switch2-waker.local` to wake the Nintendo
+  Switch 2. The request runs in the background and does not stall video.
 - Click **Color** to use Auto or choose NV12 (8-bit 4:2:0), P010 (10-bit
   4:2:0), YUY2 (8-bit 4:2:2), I420, RGB24, or MJPEG. I420 and MJPEG use NV12;
   RGB24 is expanded to GPU-compatible 32-bit RGB without a YUV conversion.

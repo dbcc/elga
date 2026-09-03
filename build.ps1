@@ -20,6 +20,8 @@ if (-not (Test-Path -LiteralPath $odinPath -PathType Leaf)) {
 $sourcePath = Join-Path $PSScriptRoot "src"
 $outputDirectory = Join-Path $PSScriptRoot "build"
 $outputPath = Join-Path $outputDirectory "elga-camera.exe"
+$noticesSourcePath = Join-Path $PSScriptRoot "THIRD_PARTY_NOTICES.md"
+$noticesOutputPath = Join-Path $outputDirectory "THIRD_PARTY_NOTICES.md"
 $debugSymbolsPath = [System.IO.Path]::ChangeExtension($outputPath, ".pdb")
 $odinArguments = @(
     "build"
@@ -42,5 +44,7 @@ if ($Configuration -eq "Release") {
 New-Item -ItemType Directory -Force $outputDirectory | Out-Null
 & $odinPath @odinArguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Copy-Item -LiteralPath $noticesSourcePath -Destination $noticesOutputPath -Force
 
 Write-Host "Built $outputPath ($Configuration)"
