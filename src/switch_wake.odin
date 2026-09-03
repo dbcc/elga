@@ -4,12 +4,14 @@ import c "core:c/libc"
 import "core:fmt"
 import "core:sync"
 import "core:thread"
+import "core:time"
 import win32 "core:sys/windows"
 import curl "vendor:curl"
 
 SWITCH_WAKE_URL                :: cstring("http://switch2-waker.local/button/Wake%20Switch%202/press")
 SWITCH_WAKE_HEALTH_URL         :: cstring("http://switch2-waker.local/button/Wake%20Switch%202")
 SWITCH_WAKE_HEALTH_INTERVAL_MS :: 5000
+SWITCH_WAKE_RESULT_DURATION    :: 2*time.Second
 
 Wake_Status :: enum u32 {
 	Unavailable,
@@ -49,6 +51,7 @@ Wake_Control :: struct {
 	cancel_requested: u32,
 	generation:       u32,
 	observed_generation: u32,
+	result_visible_since: time.Time,
 }
 
 wake_init :: proc(w: ^Wake_Control) -> bool {
@@ -108,31 +111,58 @@ wake_destroy :: proc(w: ^Wake_Control) {
 		w.initialized = false
 	}
 	wake_set_result(w, .Unavailable, .None)
+	w.result_visible_since = {}
 }
 
 wake_update :: proc(w: ^Wake_Control) -> bool {
+	changed := false
+	now := time.now()
 	if w.request_thread != nil && wake_get_status(w) != .Sending {
 		thread.join(w.request_thread)
 		thread.destroy(w.request_thread)
 		w.request_thread = nil
+		w.result_visible_since = now
+		changed = true
+	}
+	if wake_expire_result(w, now) {
+		changed = true
 	}
 	generation := sync.atomic_load_explicit(&w.generation, .Acquire)
-	changed := generation != w.observed_generation
+	changed = changed || generation != w.observed_generation
 	w.observed_generation = generation
 	return changed
 }
 
 wake_request :: proc(w: ^Wake_Control) {
 	if !w.initialized || !wake_is_online(w) || w.request_thread != nil do return
+	w.result_visible_since = {}
 	wake_set_result(w, .Sending, .None)
 	w.request_thread = thread.create(wake_request_thread_proc, .Normal, "switch-wake")
 	if w.request_thread == nil {
 		wake_set_result(w, .Failed, .Thread_Create)
+		w.result_visible_since = time.now()
 		fmt.eprintln("Switch wake: could not create request thread")
 		return
 	}
 	w.request_thread.data = w
 	thread.start(w.request_thread)
+}
+
+wake_request_in_flight :: proc(w: ^Wake_Control) -> bool {
+	return w.request_thread != nil
+}
+
+wake_expire_result :: proc(w: ^Wake_Control, now: time.Time) -> bool {
+	if w.result_visible_since == {} do return false
+	status := wake_get_status(w)
+	if status != .Success && status != .Failed {
+		w.result_visible_since = {}
+		return false
+	}
+	if time.diff(w.result_visible_since, now) < SWITCH_WAKE_RESULT_DURATION do return false
+	w.result_visible_since = {}
+	wake_set_result(w, .Idle, .None)
+	return true
 }
 
 wake_get_status :: proc(w: ^Wake_Control) -> Wake_Status {

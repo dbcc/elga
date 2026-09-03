@@ -90,6 +90,23 @@ Renderer :: struct {
 	last_presented_seq: u64,
 }
 
+renderer_request_redraw :: proc(r: ^Renderer) {
+	if r == nil || !r.ready || r.hwnd == nil do return
+	if sync.atomic_exchange_explicit(&r.redraw_pending, 1, .Relaxed) == 0 {
+		if !bool(win32.PostMessageW(r.hwnd, FRAME_READY_MESSAGE, 0, 0)) {
+			sync.atomic_store_explicit(&r.redraw_pending, 0, .Relaxed)
+		}
+	}
+}
+
+renderer_request_ui_redraw :: proc(r: ^Renderer) {
+	if r == nil || !r.ready do return
+	// Active capture already drives presentation at the source frame rate.
+	// Posting UI-only presents between those frames can race the keyed texture.
+	if sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 do return
+	renderer_request_redraw(r)
+}
+
 renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (success: bool) {
 	defer {
 		if !success do renderer_destroy(r)
@@ -179,11 +196,12 @@ renderer_draw :: proc(r: ^Renderer) {
 
 	if r.target == nil do return
 	sequence := sync.atomic_load_explicit(&r.video_sequence, .Acquire)
+	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 
 	clear := [4]f32{0, 0, 0, 1}
-	cleared := sequence == 0 || r.letterboxed
+	cleared := sequence == 0 || !capture_ready || r.letterboxed
 	if cleared do r.context_11.ClearRenderTargetView(r.context_11, r.target, &clear)
-	if sequence != 0 {
+	if sequence != 0 && capture_ready {
 		if !video_pipeline_draw(r, r.target) && !cleared {
 			r.context_11.ClearRenderTargetView(r.context_11, r.target, &clear)
 		}

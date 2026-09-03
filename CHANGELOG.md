@@ -21,3 +21,9 @@ Notable changes to Elga Camera are documented here. The project follows
 - Direct D3D11 presentation with a double-buffered flip-model swap chain.
 - Capture resources are released while minimized.
 - Frame-local allocations use a fixed arena.
+
+### Fixed
+
+- Title-bar hover and input remain responsive when capture frames stop.
+- Switch wake success and failure feedback returns to idle after two seconds.
+- Concurrent app instances use separate temporary volume-settings files.

@@ -14,7 +14,7 @@ AUDIO_CHANNELS            :: 2
 AUDIO_SAMPLE_RATE         :: 48_000
 AUDIO_VOLUME_DEFAULT      :: 100
 AUDIO_SETTINGS_FILE       :: "elga-camera.ini"
-AUDIO_SETTINGS_TEMP_FILE  :: "elga-camera.ini.tmp"
+AUDIO_SETTINGS_TEMP_FORMAT :: "elga-camera.ini.%d.tmp"
 
 Audio_Output :: struct {
 	id: ma.device_id,
@@ -159,6 +159,10 @@ audio_settings_save_failed :: proc(a: ^Audio_State) -> bool {
 audio_load_settings :: proc(a: ^Audio_State) -> bool {
 	path, _, paths_ok := audio_settings_paths()
 	if !paths_ok do return false
+	return audio_load_settings_from_path(a, path)
+}
+
+audio_load_settings_from_path :: proc(a: ^Audio_State, path: string) -> bool {
 	data, read_error := os.read_entire_file(path, context.temp_allocator)
 	if read_error != nil do return false
 	percent, parsed := audio_parse_volume_settings(string(data))
@@ -176,6 +180,11 @@ audio_save_settings :: proc(a: ^Audio_State) -> bool {
 		a.settings_save_failed = true
 		return false
 	}
+	return audio_save_settings_to_paths(a, path, temp_path)
+}
+
+audio_save_settings_to_paths :: proc(a: ^Audio_State, path, temp_path: string) -> bool {
+	if !a.settings_dirty do return !a.settings_save_failed
 	if !audio_write_volume_settings(path, temp_path, audio_get_volume_percent(a)) {
 		a.settings_save_failed = true
 		return false
@@ -188,9 +197,14 @@ audio_save_settings :: proc(a: ^Audio_State) -> bool {
 audio_settings_paths :: proc() -> (path, temp_path: string, ok: bool) {
 	directory, directory_error := os.get_executable_directory(context.temp_allocator)
 	if directory_error != nil do return "", "", false
+	return audio_settings_paths_for_directory(directory, os.get_pid())
+}
+
+audio_settings_paths_for_directory :: proc(directory: string, process_id: int) -> (path, temp_path: string, ok: bool) {
 	settings_path, path_error := filepath.join([]string{directory, AUDIO_SETTINGS_FILE}, context.temp_allocator)
 	if path_error != nil do return "", "", false
-	settings_temp_path, temp_path_error := filepath.join([]string{directory, AUDIO_SETTINGS_TEMP_FILE}, context.temp_allocator)
+	temp_name := fmt.aprintf(AUDIO_SETTINGS_TEMP_FORMAT, process_id, allocator = context.temp_allocator)
+	settings_temp_path, temp_path_error := filepath.join([]string{directory, temp_name}, context.temp_allocator)
 	if temp_path_error != nil do return "", "", false
 	return settings_path, settings_temp_path, true
 }

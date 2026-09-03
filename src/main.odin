@@ -160,6 +160,12 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 	context = runtime.default_context()
 	imgui_ui_process_message(&app.ui, hwnd, msg, wparam, lparam)
 	switch msg {
+	case win32.WM_MOUSEMOVE, win32.WM_MOUSELEAVE,
+	     win32.WM_LBUTTONDOWN, win32.WM_LBUTTONUP, win32.WM_LBUTTONDBLCLK,
+	     win32.WM_RBUTTONDOWN, win32.WM_RBUTTONUP, win32.WM_RBUTTONDBLCLK,
+	     win32.WM_MBUTTONDOWN, win32.WM_MBUTTONUP, win32.WM_MBUTTONDBLCLK,
+	     win32.WM_MOUSEWHEEL, win32.WM_MOUSEHWHEEL:
+		if app.controls_visible || app.ui.menu_open do renderer_request_ui_redraw(&app.renderer)
 	case win32.WM_ERASEBKGND:
 		return 1
 	case win32.WM_PAINT:
@@ -335,7 +341,8 @@ ui_tick :: proc() {
 	}
 	controls_changed := app.controls_visible != visible
 	app.controls_visible = visible
-	if (controls_changed || wake_changed) && app.renderer.ready do renderer_draw(&app.renderer)
+	ui_interaction_active := app.controls_visible && (inside || app.ui.menu_open)
+	if controls_changed || wake_changed || ui_interaction_active do renderer_request_ui_redraw(&app.renderer)
 
 	when ELGA_FULLSCREEN_STRESS do fullscreen_stress_tick()
 	when ELGA_FORMAT_STRESS do format_stress_tick()

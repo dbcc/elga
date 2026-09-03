@@ -49,6 +49,7 @@ ImGui_State :: struct {
 	last_frame: time.Time,
 	mouse_pos: imgui.Vec2,
 	mouse_dirty: bool,
+	mouse_tracking: bool,
 	dpi_scale: f32,
 	font: ^imgui.Font,
 	font_size: f32,
@@ -219,7 +220,7 @@ imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui.SameLine()
 		wake_status := wake_get_status(&app.wake)
 		wake_online := wake_is_online(&app.wake)
-		wake_disabled := !wake_online || wake_status == .Sending
+		wake_disabled := !wake_online || wake_status == .Sending || wake_request_in_flight(&app.wake)
 		imgui.BeginDisabled(wake_disabled)
 		wake_clicked := icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success)
 		imgui.EndDisabled()
@@ -537,6 +538,18 @@ imgui_ui_process_message :: proc(ui: ^ImGui_State, hwnd: win32.HWND, msg: win32.
 	if msg == win32.WM_MOUSEMOVE {
 		ui.mouse_pos = {f32(win32.GET_X_LPARAM(lparam)), f32(win32.GET_Y_LPARAM(lparam))}
 		ui.mouse_dirty = true
+		if !ui.mouse_tracking {
+			tracking := win32.TRACKMOUSEEVENT {
+				cbSize = size_of(win32.TRACKMOUSEEVENT),
+				dwFlags = win32.TME_LEAVE,
+				hwndTrack = hwnd,
+			}
+			ui.mouse_tracking = bool(win32.TrackMouseEvent(&tracking))
+		}
+	} else if msg == win32.WM_MOUSELEAVE {
+		ui.mouse_pos = {-1, -1}
+		ui.mouse_dirty = true
+		ui.mouse_tracking = false
 	}
 	// Do not accumulate stale canvas clicks while ImGui is completely hidden.
 	// Mouse movement is retained separately for the next visible frame.

@@ -1,5 +1,7 @@
 package main
 
+import "core:os"
+import "core:path/filepath"
 import "core:sync"
 import "core:testing"
 
@@ -74,5 +76,56 @@ audio_volume_settings_test :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, percent, u32(35))
 
-	testing.expect(t, !audio_write_volume_settings("", "", 50))
+	temp_directory, temp_error := os.make_directory_temp("", "elga-audio-test-*", context.temp_allocator)
+	testing.expect(t, temp_error == nil)
+	if temp_error != nil do return
+	settings_path, temp_path, paths_ok := audio_settings_paths_for_directory(temp_directory, 1001)
+	testing.expect(t, paths_ok)
+	_, second_temp_path, second_paths_ok := audio_settings_paths_for_directory(temp_directory, 1002)
+	testing.expect(t, second_paths_ok)
+	testing.expect(t, temp_path != second_temp_path)
+	blocker_path, blocker_path_error := filepath.join([]string{temp_directory, "not-a-directory"}, context.temp_allocator)
+	testing.expect(t, blocker_path_error == nil)
+	bad_settings_path, bad_settings_path_error := filepath.join([]string{blocker_path, AUDIO_SETTINGS_FILE}, context.temp_allocator)
+	testing.expect(t, bad_settings_path_error == nil)
+	bad_temp_path, bad_temp_path_error := filepath.join([]string{blocker_path, "settings.tmp"}, context.temp_allocator)
+	testing.expect(t, bad_temp_path_error == nil)
+	defer {
+		_ = os.remove(settings_path)
+		_ = os.remove(temp_path)
+		_ = os.remove(second_temp_path)
+		_ = os.remove(blocker_path)
+		_ = os.remove(temp_directory)
+	}
+
+	saved: Audio_State
+	sync.atomic_store_explicit(&saved.volume_percent, 42, .Relaxed)
+	saved.settings_dirty = true
+	testing.expect(t, audio_save_settings_to_paths(&saved, settings_path, temp_path))
+	testing.expect(t, !saved.settings_dirty)
+	testing.expect(t, !saved.settings_save_failed)
+
+	loaded: Audio_State
+	sync.atomic_store_explicit(&loaded.volume_percent, AUDIO_VOLUME_DEFAULT, .Relaxed)
+	testing.expect(t, audio_load_settings_from_path(&loaded, settings_path))
+	testing.expect_value(t, audio_get_volume_percent(&loaded), u32(42))
+
+	testing.expect(t, os.write_entire_file(blocker_path, "block") == nil)
+	failed: Audio_State
+	sync.atomic_store_explicit(&failed.volume_percent, 77, .Relaxed)
+	failed.settings_dirty = true
+	testing.expect(t, !audio_save_settings_to_paths(&failed, bad_settings_path, bad_temp_path))
+	testing.expect_value(t, audio_get_volume_percent(&failed), u32(77))
+	testing.expect(t, failed.settings_dirty)
+	testing.expect(t, failed.settings_save_failed)
+	testing.expect(t, audio_save_settings_to_paths(&failed, settings_path, temp_path))
+	testing.expect(t, !failed.settings_dirty)
+	testing.expect(t, !failed.settings_save_failed)
+	testing.expect(t, audio_load_settings_from_path(&loaded, settings_path))
+	testing.expect_value(t, audio_get_volume_percent(&loaded), u32(77))
+
+	missing: Audio_State
+	sync.atomic_store_explicit(&missing.volume_percent, AUDIO_VOLUME_DEFAULT, .Relaxed)
+	testing.expect(t, !audio_load_settings_from_path(&missing, second_temp_path))
+	testing.expect_value(t, audio_get_volume_percent(&missing), u32(AUDIO_VOLUME_DEFAULT))
 }

@@ -603,11 +603,7 @@ capture_publish_frame :: proc(r: ^Renderer) {
 	// Keep the renderer on the window thread and allow at most one queued
 	// wake-up. Custom messages are serviced by the modal move/resize loop,
 	// unlike an external event loop that Windows pauses while dragging.
-	if sync.atomic_exchange_explicit(&r.redraw_pending, 1, .Relaxed) == 0 {
-		if !bool(win32.PostMessageW(r.hwnd, FRAME_READY_MESSAGE, 0, 0)) {
-			sync.atomic_store_explicit(&r.redraw_pending, 0, .Relaxed)
-		}
-	}
+	renderer_request_redraw(r)
 }
 
 utf16_contains_ascii_case_insensitive :: proc(text: ^u16, length: u32, needle: string) -> bool {
