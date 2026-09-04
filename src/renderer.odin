@@ -73,6 +73,7 @@ Renderer :: struct {
 	source_modes:    [MAX_CAPTURE_MODES]Capture_Mode,
 	source_mode_count: u32,
 	format_auto:     bool,
+	startup_auto_resolved: bool,
 	requested_width:  u32,
 	requested_height: u32,
 	resource_width:   u32,
@@ -88,10 +89,11 @@ Renderer :: struct {
 	fps_window_start:   time.Time,
 	fps_window_frames:  u32,
 	last_presented_seq: u64,
+	last_video_present: time.Time,
 }
 
 renderer_request_redraw :: proc(r: ^Renderer) {
-	if r == nil || !r.ready || r.hwnd == nil do return
+	if r == nil || r.hwnd == nil do return
 	if sync.atomic_exchange_explicit(&r.redraw_pending, 1, .Relaxed) == 0 {
 		if !bool(win32.PostMessageW(r.hwnd, FRAME_READY_MESSAGE, 0, 0)) {
 			sync.atomic_store_explicit(&r.redraw_pending, 0, .Relaxed)
@@ -100,10 +102,9 @@ renderer_request_redraw :: proc(r: ^Renderer) {
 }
 
 renderer_request_ui_redraw :: proc(r: ^Renderer) {
-	if r == nil || !r.ready do return
-	// Active capture already drives presentation at the source frame rate.
-	// Posting UI-only presents between those frames can race the keyed texture.
-	if sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 do return
+	if r == nil || !r.ready || r.capture_suspended do return
+	// Let incoming frames drive the UI, but keep controls usable if HDMI stalls.
+	if r.last_video_present != {} && time.since(r.last_video_present) < 100*time.Millisecond do return
 	renderer_request_redraw(r)
 }
 
@@ -136,6 +137,11 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 	if !renderer_init_ok("render D3D11CreateDevice", hr) do return false
 	hr = d3d11.CreateDevice(nil, .HARDWARE, nil, {.BGRA_SUPPORT, .VIDEO_SUPPORT}, &feature_levels[0], 1, d3d11.SDK_VERSION, &r.capture_device_11, nil, &r.capture_context_11)
 	if !renderer_init_ok("capture D3D11CreateDevice", hr) do return false
+	multithread: ^ID3D10Multithread
+	hr = r.capture_device_11.QueryInterface(r.capture_device_11, ID3D10Multithread_UUID, cast(^rawptr)&multithread)
+	if !renderer_init_ok("capture multithread protection", hr) do return false
+	multithread.SetMultithreadProtected(multithread, true)
+	com_release(multithread)
 	hr_video := r.capture_device_11.QueryInterface(r.capture_device_11, d3d11.IVideoDevice_UUID, cast(^rawptr)&r.video_device)
 	if failed(hr_video) { fmt.eprintf("IVideoDevice unavailable: 0x%08x\n", u32(hr_video)); return false }
 	hr_video = r.capture_context_11.QueryInterface(r.capture_context_11, d3d11.IVideoContext_UUID, cast(^rawptr)&r.video_context)
@@ -197,14 +203,15 @@ renderer_draw :: proc(r: ^Renderer) {
 	if r.target == nil do return
 	sequence := sync.atomic_load_explicit(&r.video_sequence, .Acquire)
 	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
+	presented_sequence: u64
 
 	clear := [4]f32{0, 0, 0, 1}
 	cleared := sequence == 0 || !capture_ready || r.letterboxed
 	if cleared do r.context_11.ClearRenderTargetView(r.context_11, r.target, &clear)
 	if sequence != 0 && capture_ready {
-		if !video_pipeline_draw(r, r.target) && !cleared {
-			r.context_11.ClearRenderTargetView(r.context_11, r.target, &clear)
-		}
+		// Keep the previous presentation on screen while capture owns the surface.
+		presented_sequence = video_pipeline_draw(r, r.target)
+		if presented_sequence == 0 do return
 	}
 
 	// Skip all ImGui work while the fullscreen title bar is hidden.
@@ -219,8 +226,9 @@ renderer_draw :: proc(r: ^Renderer) {
 	present_flags := dxgi.PRESENT{.ALLOW_TEARING} if r.allow_tearing else dxgi.PRESENT{}
 	if failed(r.swap_chain.Present(r.swap_chain, 0, present_flags)) do return
 	now := time.now()
-	if sequence != 0 && sequence != r.last_presented_seq {
-		r.last_presented_seq = sequence
+	if presented_sequence != 0 && presented_sequence != r.last_presented_seq {
+		r.last_presented_seq = presented_sequence
+		r.last_video_present = now
 		r.fps_window_frames += 1
 	}
 	elapsed := time.duration_seconds(time.diff(r.fps_window_start, now))
@@ -368,11 +376,11 @@ video_resources_create :: proc(r: ^Renderer, format: Capture_Format, width, heig
 	if failed(hr_resource) { fmt.eprintf("Video shared handle failed: 0x%08x\n", u32(hr_resource)); return false }
 	defer win32.CloseHandle(shared_handle)
 
-	device_3: ^ID3D11Device3
-	hr_resource = r.device_11.QueryInterface(r.device_11, ID3D11Device3_UUID, cast(^rawptr)&device_3)
-	if failed(hr_resource) { fmt.eprintf("Render ID3D11Device3 failed: 0x%08x\n", u32(hr_resource)); return false }
-	defer com_release(device_3)
-	hr_resource = device_3.OpenSharedResource1(device_3, shared_handle, d3d11.ITexture2D_UUID, cast(^rawptr)&r.video_texture)
+	device_1: ^ID3D11Device1
+	hr_resource = r.device_11.QueryInterface(r.device_11, ID3D11Device1_UUID, cast(^rawptr)&device_1)
+	if failed(hr_resource) { fmt.eprintf("Render ID3D11Device1 failed: 0x%08x\n", u32(hr_resource)); return false }
+	defer com_release(device_1)
+	hr_resource = device_1.OpenSharedResource1(device_1, shared_handle, d3d11.ITexture2D_UUID, cast(^rawptr)&r.video_texture)
 	if failed(hr_resource) { fmt.eprintf("Open video shared resource failed: 0x%08x\n", u32(hr_resource)); return false }
 	hr_resource = r.processed_texture.QueryInterface(r.processed_texture, dxgi.IKeyedMutex_UUID, cast(^rawptr)&r.capture_mutex)
 	if failed(hr_resource) { fmt.eprintf("Capture keyed mutex failed: 0x%08x\n", u32(hr_resource)); return false }
@@ -508,7 +516,10 @@ compile_shader :: proc(entry, target: cstring) -> ^d3dc.ID3DBlob {
 		if errors != nil do fmt.eprintf("%s\n", cast(cstring)errors.GetBufferPointer(errors))
 	}
 	if errors != nil do com_release(errors)
-	if failed(hr) do return nil
+	if failed(hr) {
+		com_release(code)
+		return nil
+	}
 	return code
 }
 
@@ -536,10 +547,17 @@ video_pipeline_bind :: proc(r: ^Renderer) {
 	r.context_11.PSSetSamplers(r.context_11, 0, 1, &samplers[0])
 }
 
-video_pipeline_draw :: proc(r: ^Renderer, target: ^d3d11.IRenderTargetView) -> bool {
-	if r.render_mutex == nil do return false
-	if failed(r.render_mutex.AcquireSync(r.render_mutex, 1, 0)) do return false
+video_mutex_acquire :: proc(mutex: ^dxgi.IKeyedMutex, key: u64) -> bool {
+	// WAIT_TIMEOUT and WAIT_ABANDONED are positive HRESULTs, not acquisitions.
+	return mutex != nil && mutex.AcquireSync(mutex, key, 0) == win32.HRESULT(win32.S_OK)
+}
+
+video_pipeline_draw :: proc(r: ^Renderer, target: ^d3d11.IRenderTargetView) -> u64 {
+	// Key 1 consumes a new frame. Key 0 allows repainting the last frame during
+	// resize or a stalled source without allocating another capture-sized texture.
+	if !video_mutex_acquire(r.render_mutex, 1) && !video_mutex_acquire(r.render_mutex, 0) do return 0
 	defer r.render_mutex.ReleaseSync(r.render_mutex, 0)
+	sequence := sync.atomic_load_explicit(&r.video_sequence, .Acquire)
 	targets := [1]^d3d11.IRenderTargetView{target}
 	views := [1]^d3d11.IShaderResourceView{r.rgb_view}
 	pixel_shader := r.flipped_pixel_shader if sync.atomic_load_explicit(&r.video_vertical_flip, .Acquire) != 0 else r.native_pixel_shader
@@ -549,7 +567,7 @@ video_pipeline_draw :: proc(r: ^Renderer, target: ^d3d11.IRenderTargetView) -> b
 	r.context_11.Draw(r.context_11, 3, 0)
 	null_views := [1]^d3d11.IShaderResourceView{nil}
 	r.context_11.PSSetShaderResources(r.context_11, 0, len(null_views), &null_views[0])
-	return true
+	return sequence
 }
 
 renderer_set_capture_format :: proc(r: ^Renderer, format: Capture_Format) {
@@ -673,9 +691,6 @@ renderer_apply_capture_configuration :: proc(
 		}
 	}
 	capture_stop(r)
-	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Relaxed)
-	sync.atomic_store_explicit(&r.source_mode_count, 0, .Relaxed)
-	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
 	video_resources_release(r)
 	r.capture_format = format
 	r.format_auto = format_auto
@@ -712,9 +727,13 @@ renderer_apply_capture_configuration :: proc(
 }
 
 renderer_handle_capture_failure :: proc(r: ^Renderer, generation: u32) {
+	if !r.ready || r.capture_suspended do return
 	if generation != sync.atomic_load_explicit(&r.capture_generation, .Acquire) do return
 	if sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 do return
-	if !r.last_working_valid do return
+	if !r.last_working_valid {
+		renderer_reconcile_auto_capture(r)
+		return
+	}
 	if r.capture_format == r.last_working_format &&
 	   r.requested_width == r.last_working_requested_width &&
 	   r.requested_height == r.last_working_requested_height {
@@ -730,6 +749,23 @@ renderer_handle_capture_failure :: proc(r: ^Renderer, generation: u32) {
 	resource_height := r.last_working_resource_height
 	r.last_working_valid = false
 	renderer_apply_capture_configuration(r, format, requested_width, requested_height, format_auto, resource_width, resource_height)
+}
+
+// Startup uses a provisional NV12/4K allocation before the device's modes are
+// known. Resolve Auto after enumeration, including devices without that mode.
+renderer_reconcile_auto_capture :: proc(r: ^Renderer) {
+	if !r.ready || !r.format_auto || r.capture_suspended || r.startup_auto_resolved do return
+	format, found := capture_pick_auto_format(r, r.requested_width, r.requested_height)
+	if !found do return
+	r.startup_auto_resolved = true
+	width, height := r.requested_width, r.requested_height
+	if width == 0 {
+		best, best_found := capture_pick_best_mode_for_format(r, format)
+		if !best_found do return
+		width, height = best.width, best.height
+	}
+	if format == r.capture_format && width == r.resource_width && height == r.resource_height do return
+	renderer_apply_capture_configuration(r, format, r.requested_width, r.requested_height, true, width, height)
 }
 
 failed :: proc(hr: win32.HRESULT) -> bool {

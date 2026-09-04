@@ -34,14 +34,14 @@ ID3D11VideoContext1_VTable :: struct {
 
 // Odin's D3D11 package currently stops at ID3D11Device. Preserve the inherited
 // vtable layout and expose only D3D11.1 shared-handle opening.
-ID3D11Device3_UUID := &win32.GUID{0xa05c8c37, 0xd2c6, 0x4732, {0xb3, 0xa0, 0x9c, 0xe0, 0xb0, 0xdc, 0x9a, 0xe6}}
+ID3D11Device1_UUID := &win32.GUID{0xa04bfb29, 0x08ef, 0x43d6, {0xa4, 0x9c, 0xa9, 0xbd, 0xbd, 0xcb, 0xe6, 0x86}}
 
-ID3D11Device3 :: struct #raw_union {
+ID3D11Device1 :: struct #raw_union {
 	#subtype device: d3d11.IDevice,
-	using vtable: ^ID3D11Device3_VTable,
+	using vtable: ^ID3D11Device1_VTable,
 }
 
-ID3D11Device3_VTable :: struct {
+ID3D11Device1_VTable :: struct {
 	using base: d3d11.IDevice_VTable,
 	// ID3D11Device1
 	GetImmediateContext1: rawptr,
@@ -49,5 +49,21 @@ ID3D11Device3_VTable :: struct {
 	CreateBlendState1: rawptr,
 	CreateRasterizerState1: rawptr,
 	CreateDeviceContextState: rawptr,
-	OpenSharedResource1: proc "system" (this: ^ID3D11Device3, handle: win32.HANDLE, riid: ^win32.GUID, resource: ^rawptr) -> win32.HRESULT,
+	OpenSharedResource1: proc "system" (this: ^ID3D11Device1, handle: win32.HANDLE, riid: ^win32.GUID, resource: ^rawptr) -> win32.HRESULT,
+}
+
+// Media Foundation and the capture callback share an immediate context.
+ID3D10Multithread_UUID := &win32.GUID{0x9b7e4e00, 0x342c, 0x4106, {0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0}}
+
+ID3D10Multithread :: struct #raw_union {
+	#subtype unknown: win32.IUnknown,
+	using vtable: ^ID3D10Multithread_VTable,
+}
+
+ID3D10Multithread_VTable :: struct {
+	using base: win32.IUnknown_VTable,
+	Enter: rawptr,
+	Leave: rawptr,
+	SetMultithreadProtected: proc "system" (this: ^ID3D10Multithread, protect: win32.BOOL) -> win32.BOOL,
+	GetMultithreadProtected: rawptr,
 }

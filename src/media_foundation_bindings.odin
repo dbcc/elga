@@ -28,6 +28,7 @@ foreign mfreadwrite_lib {
 MF_VERSION :: 131184
 MFSTARTUP_FULL :: 0
 MF_SOURCE_READER_FIRST_VIDEO_STREAM :: u32(0xffff_fffc)
+MF_SOURCE_READER_ALL_STREAMS :: u32(0xffff_fffe)
 
 IID_IMFMediaSource := &win32.GUID{0x279a808d, 0xaec7, 0x40c8, {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}}
 IID_IMFDXGIBuffer := &win32.GUID{0xe7174cfa, 0x1c9e, 0x48b1, {0x88, 0x66, 0x62, 0x62, 0x26, 0xbf, 0xc2, 0x58}}
@@ -143,7 +144,7 @@ IMFSourceReader :: struct #raw_union {
 IMFSourceReader_VTable :: struct {
 	using unknown_vtable: win32.IUnknown_VTable,
 	GetStreamSelection: rawptr,
-	SetStreamSelection: rawptr,
+	SetStreamSelection: proc "system" (this: ^IMFSourceReader, stream: u32, selected: win32.BOOL) -> win32.HRESULT,
 	GetNativeMediaType: proc "system" (this: ^IMFSourceReader, stream, index: u32, media_type: ^^IMFMediaType) -> win32.HRESULT,
 	GetCurrentMediaType: proc "system" (this: ^IMFSourceReader, stream: u32, media_type: ^^IMFMediaType) -> win32.HRESULT,
 	SetCurrentMediaType: proc "system" (this: ^IMFSourceReader, stream: u32, reserved: ^u32, media_type: ^IMFMediaType) -> win32.HRESULT,
@@ -192,7 +193,7 @@ IMFSample_VTable :: struct {
 	GetBufferCount: proc "system" (this: ^IMFSample, count: ^u32) -> win32.HRESULT,
 	GetBufferByIndex: proc "system" (this: ^IMFSample, index: u32, buffer: ^^IMFMediaBuffer) -> win32.HRESULT,
 	ConvertToContiguousBuffer: proc "system" (this: ^IMFSample, buffer: ^^IMFMediaBuffer) -> win32.HRESULT,
-	AddBuffer: rawptr,
+	AddBuffer: proc "system" (this: ^IMFSample, buffer: ^IMFMediaBuffer) -> win32.HRESULT,
 	RemoveBufferByIndex: rawptr,
 	RemoveAllBuffers: rawptr,
 	GetTotalLength: rawptr,
@@ -208,7 +209,7 @@ IMFMediaBuffer_VTable :: struct {
 	Lock: proc "system" (this: ^IMFMediaBuffer, buffer: ^^u8, max_length, current_length: ^u32) -> win32.HRESULT,
 	Unlock: proc "system" (this: ^IMFMediaBuffer) -> win32.HRESULT,
 	GetCurrentLength: proc "system" (this: ^IMFMediaBuffer, current_length: ^u32) -> win32.HRESULT,
-	SetCurrentLength: rawptr,
+	SetCurrentLength: proc "system" (this: ^IMFMediaBuffer, length: u32) -> win32.HRESULT,
 	GetMaxLength: rawptr,
 }
 

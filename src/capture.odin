@@ -36,6 +36,8 @@ Source_Reader_Callback :: struct {
 	ref_count: u32,
 	renderer:  ^Renderer,
 	reader:    ^IMFSourceReader,
+	mutex:     sync.Mutex,
+	flush_event: win32.HANDLE,
 }
 
 source_reader_callback_vtable := IMFSourceReaderCallback_VTable {
@@ -66,14 +68,23 @@ source_reader_add_ref :: proc "system" (this: ^win32.IUnknown) -> win32.ULONG {
 }
 
 source_reader_release :: proc "system" (this: ^win32.IUnknown) -> win32.ULONG {
+	context = runtime.default_context()
 	callback := cast(^Source_Reader_Callback)this
-	return win32.ULONG(sync.atomic_sub_explicit(&callback.ref_count, 1, .Release)-1)
+	remaining := sync.atomic_sub_explicit(&callback.ref_count, 1, .Acq_Rel)-1
+	if remaining == 0 {
+		if callback.flush_event != nil do win32.CloseHandle(callback.flush_event)
+		free(callback)
+	}
+	return win32.ULONG(remaining)
 }
 
 source_reader_on_read_sample :: proc "system" (this: ^IMFSourceReaderCallback, status: win32.HRESULT, stream, flags: u32, timestamp: i64, sample: ^IMFSample) -> win32.HRESULT {
 	context = runtime.default_context()
 	callback := cast(^Source_Reader_Callback)this
+	sync.mutex_lock(&callback.mutex)
+	defer sync.mutex_unlock(&callback.mutex)
 	r := callback.renderer
+	if r == nil || !sync.atomic_load_explicit(&r.capture_running, .Acquire) do return win32.HRESULT(win32.S_OK)
 	if !failed(status) && sample != nil {
 		capture_copy_sample(r, sample)
 	} else if failed(status) && sync.atomic_load_explicit(&r.capture_running, .Acquire) {
@@ -88,7 +99,28 @@ source_reader_on_read_sample :: proc "system" (this: ^IMFSourceReaderCallback, s
 }
 
 source_reader_on_flush :: proc "system" (this: ^IMFSourceReaderCallback, stream: u32) -> win32.HRESULT {
+	callback := cast(^Source_Reader_Callback)this
+	win32.SetEvent(callback.flush_event)
 	return win32.HRESULT(win32.S_OK)
+}
+
+// Detach before releasing the reader or GPU resources. Late COM callbacks keep
+// their own reference alive, but can no longer touch this capture session.
+source_reader_detach :: proc(callback: ^Source_Reader_Callback) {
+	sync.mutex_lock(&callback.mutex)
+	defer sync.mutex_unlock(&callback.mutex)
+	callback.renderer = nil
+	callback.reader = nil
+}
+
+capture_wait_for_flush :: proc(r: ^Renderer, callback: ^Source_Reader_Callback) -> bool {
+	handles := [2]win32.HANDLE{callback.flush_event, r.capture_event}
+	for sync.atomic_load_explicit(&r.capture_running, .Acquire) {
+		result := win32.WaitForMultipleObjects(2, &handles[0], false, win32.INFINITE)
+		if result == win32.WAIT_OBJECT_0 do return true
+		if result != win32.WAIT_OBJECT_0+1 do return false
+	}
+	return false
 }
 
 source_reader_on_event :: proc "system" (this: ^IMFSourceReaderCallback, stream: u32, event: rawptr) -> win32.HRESULT {
@@ -110,6 +142,9 @@ capture_start :: proc(r: ^Renderer) -> bool {
 	if r.capture_thread != nil do return true
 	sync.atomic_store_explicit(&r.capture_ready, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_refresh, 0, .Release)
+	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Release)
+	sync.atomic_store_explicit(&r.source_mode_count, 0, .Release)
+	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)
 	if r.capture_event == nil {
 		fmt.eprintln("Capture control event creation failed")
@@ -173,17 +208,22 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	}
 	defer MFShutdown()
 
-	callback := Source_Reader_Callback {
+	callback := new(Source_Reader_Callback, runtime.default_context().allocator)
+	callback^ = Source_Reader_Callback {
 		vtable = &source_reader_callback_vtable,
 		ref_count = 1,
 		renderer = r,
 	}
-	reader, source, mode, ok := capture_open_reader(r, cast(^IMFSourceReaderCallback)&callback)
+	defer com_release(callback)
+	callback.flush_event = win32.CreateEventW(nil, false, false, nil)
+	if callback.flush_event == nil do return
+	reader, source, mode, ok := capture_open_reader(r, cast(^IMFSourceReaderCallback)callback)
 	defer com_release(source)
 	defer {
 		if source != nil do source.Shutdown(source)
 	}
 	defer com_release(reader)
+	defer source_reader_detach(callback)
 	if !ok {
 		fmt.eprintln("Elgato 4K X capture initialization failed")
 		return
@@ -202,9 +242,10 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	video_processor_set_color(r)
 	callback.reader = reader
 	sync.atomic_store_explicit(&r.capture_ready, 1, .Release)
+	win32.PostMessageW(r.hwnd, CAPTURE_READY_MESSAGE, win32.WPARAM(generation), 0)
 	path := capture_format_pipeline_name(mode.format)
 	presentation := "D3D11 copy" if mode.format == .RGB24 else "D3D11 video processor"
-		fmt.eprintf("Capture ready: %dx%d @ %.3f FPS, %s, %s range (%s -> %s -> D3D11)\n", mode.width, mode.height, f64(mode.fps_num)/f64(mode.fps_den), capture_format_name(mode.format), video_range_name(mode.range), path, presentation)
+	fmt.eprintf("Capture ready: %dx%d @ %.3f FPS, %s, %s range (%s -> %s -> D3D11)\n", mode.width, mode.height, f64(mode.fps_num)/f64(mode.fps_den), capture_format_name(mode.format), video_range_name(mode.range), path, presentation)
 	fmt.eprintf("Color metadata: matrix=%d\n", mode.yuv_matrix)
 	hr = reader.ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil)
 	if failed(hr) {
@@ -214,16 +255,20 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	for sync.atomic_load_explicit(&r.capture_running, .Acquire) {
 		if win32.WaitForSingleObject(r.capture_event, win32.INFINITE) != win32.WAIT_OBJECT_0 do break
 		if !sync.atomic_load_explicit(&r.capture_running, .Acquire) do break
-		if sync.atomic_exchange_explicit(&r.capture_refresh, 0, .Acq_Rel) == 0 do continue
-		reader.Flush(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM)
-		// The 4K X briefly rebuilds its HDMI pipeline after a range change.
-		win32.Sleep(250)
+		if sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 do continue
+		// Drain any callback that could still be issuing ReadSample before Flush.
+		sync.mutex_lock(&callback.mutex)
+		sync.mutex_unlock(&callback.mutex)
+		if failed(reader.Flush(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM)) do break
+		if !capture_wait_for_flush(r, callback) do break
+		// Back off a temporarily unavailable HDMI source, but wake on shutdown.
+		win32.WaitForSingleObject(r.capture_event, 250)
 		if sync.atomic_load_explicit(&r.capture_running, .Acquire) {
+			sync.atomic_store_explicit(&r.capture_refresh, 0, .Release)
 			hr = reader.ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil)
 			if failed(hr) do capture_request_refresh(r)
 		}
 	}
-	reader.Flush(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM)
 }
 
 capture_open_reader :: proc(r: ^Renderer, callback: ^IMFSourceReaderCallback) -> (reader: ^IMFSourceReader, source: ^IMFMediaSource, selected_mode: Capture_Mode, ok: bool) {
@@ -275,6 +320,10 @@ capture_open_reader :: proc(r: ^Renderer, callback: ^IMFSourceReaderCallback) ->
 	reader_attributes.SetUINT32(reader_attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
 	reader_attributes.SetUINT32(reader_attributes, &MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
 	if failed(MFCreateSourceReaderFromMediaSource(source, reader_attributes, &reader)) do return
+	// Audio is monitored separately through WASAPI. Unread selected streams can
+	// otherwise accumulate samples inside the Media Foundation source.
+	if failed(reader.SetStreamSelection(reader, MF_SOURCE_READER_ALL_STREAMS, false)) do return
+	if failed(reader.SetStreamSelection(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, true)) do return
 	reader_ex: ^IMFSourceReaderEx
 	if failed(reader.QueryInterface(reader, IID_IMFSourceReaderEx, cast(^rawptr)&reader_ex)) do return
 	defer com_release(reader_ex)
@@ -343,7 +392,7 @@ capture_enumerate_modes :: proc(reader: ^IMFSourceReader, requested: Capture_For
 			format = format,
 			native_index = index,
 		}
-		if mode.height == 0 || mode.fps_num == 0 || mode.fps_den == 0 || mode.width*9 != mode.height*16 do continue
+		if mode.height == 0 || mode.fps_num == 0 || mode.fps_den == 0 || u64(mode.width)*9 != u64(mode.height)*16 do continue
 		available |= u32(1) << u32(format)
 		if source_count >= len(r.source_modes) do continue
 		source_index := source_count
@@ -379,18 +428,6 @@ capture_format_from_guid :: proc(subtype: win32.GUID) -> (Capture_Format, bool) 
 	case MFVideoFormat_MJPG: return .MJPEG, true
 	}
 	return .NV12, false
-}
-
-capture_format_guid :: proc(format: Capture_Format) -> ^win32.GUID {
-	switch format {
-	case .NV12: return &MFVideoFormat_NV12
-	case .P010: return &MFVideoFormat_P010
-	case .YUY2: return &MFVideoFormat_YUY2
-	case .I420: return &MFVideoFormat_I420
-	case .RGB24: return &MFVideoFormat_RGB24
-	case .MJPEG: return &MFVideoFormat_MJPG
-	}
-	return &MFVideoFormat_NV12
 }
 
 capture_format_name :: proc(format: Capture_Format) -> cstring {
@@ -524,13 +561,26 @@ mode_better :: proc(a, b: Capture_Mode) -> bool {
 }
 
 capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
+	// Drop a busy frame before querying COM buffers or merging software samples.
+	if !video_mutex_acquire(r.capture_mutex, 0) do return
+	ok := capture_upload_sample(r, sample) && capture_process_uploaded_frame(r)
+	if ok {
+		// Publish metadata while the matching texture is exclusively owned.
+		sync.atomic_add_explicit(&r.video_sequence, 1, .Release)
+	}
+	// Failed uploads/conversions leave the capture key available for a retry.
+	r.capture_mutex.ReleaseSync(r.capture_mutex, 1 if ok else 0)
+	if ok do renderer_request_redraw(r)
+}
+
+capture_upload_sample :: proc(r: ^Renderer, sample: ^IMFSample) -> bool {
 	count: u32
-	if failed(sample.GetBufferCount(sample, &count)) || count == 0 do return
+	if failed(sample.GetBufferCount(sample, &count)) || count == 0 do return false
 	buffer: ^IMFMediaBuffer
 	if count == 1 {
-		if failed(sample.GetBufferByIndex(sample, 0, &buffer)) do return
+		if failed(sample.GetBufferByIndex(sample, 0, &buffer)) do return false
 	} else {
-		if failed(sample.ConvertToContiguousBuffer(sample, &buffer)) do return
+		if failed(sample.ConvertToContiguousBuffer(sample, &buffer)) do return false
 	}
 	defer com_release(buffer)
 
@@ -543,20 +593,21 @@ capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
 		if !failed(hr) do hr = dxgi_buffer.GetSubresourceIndex(dxgi_buffer, &subresource)
 		com_release(dxgi_buffer)
 		if !failed(hr) && texture != nil {
-			if failed(r.capture_mutex.AcquireSync(r.capture_mutex, 0, 0)) {
-				com_release(texture)
-				return
+			defer com_release(texture)
+			desc: d3d11.TEXTURE2D_DESC
+			texture.GetDesc(texture, &desc)
+			if desc.MipLevels == 0 || u64(subresource) >= u64(desc.MipLevels)*u64(desc.ArraySize) do return false
+			mip := subresource%desc.MipLevels
+			if desc.Format != capture_format_dxgi(r.capture_format) ||
+			   max(desc.Width>>mip, 1) < r.capture_width || max(desc.Height>>mip, 1) < r.capture_height {
+				return false
 			}
-			if r.capture_format == .RGB24 {
-				r.capture_context_11.CopySubresourceRegion(r.capture_context_11, cast(^d3d11.IResource)r.processed_texture, 0, 0, 0, 0, cast(^d3d11.IResource)texture, subresource, nil)
-			} else {
-				r.capture_context_11.CopySubresourceRegion(r.capture_context_11, cast(^d3d11.IResource)r.capture_texture, 0, 0, 0, 0, cast(^d3d11.IResource)texture, subresource, nil)
-			}
+			// Decoder surfaces may include alignment padding beyond the image.
+			box := d3d11.BOX{right = r.capture_width, bottom = r.capture_height, back = 1}
+			destination := r.processed_texture if r.capture_format == .RGB24 else r.capture_texture
+			r.capture_context_11.CopySubresourceRegion(r.capture_context_11, cast(^d3d11.IResource)destination, 0, 0, 0, 0, cast(^d3d11.IResource)texture, subresource, &box)
 			sync.atomic_store_explicit(&r.video_vertical_flip, 0, .Release)
-			ok := capture_process_uploaded_frame(r)
-			com_release(texture)
-			if ok do capture_publish_frame(r)
-			return
+			return true
 		}
 		com_release(texture)
 	}
@@ -566,44 +617,38 @@ capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
 	// texture used by the zero-copy path.
 	data: ^u8
 	max_length, current_length: u32
-	if failed(buffer.Lock(buffer, &data, &max_length, &current_length)) || data == nil do return
+	if failed(buffer.Lock(buffer, &data, &max_length, &current_length)) do return false
 	defer buffer.Unlock(buffer)
-	output_format := r.capture_format if capture_format_is_gpu(r.capture_format) else Capture_Format.NV12
-	default_pitch := r.capture_width
-	if output_format == .P010 || output_format == .YUY2 do default_pitch *= 2
-	if r.capture_format == .RGB24 do default_pitch *= 4
-	pitch := u32(abs(r.capture_stride)) if r.capture_stride != 0 else default_pitch
-	minimum_length := u64(pitch)*u64(r.capture_height)
-	if r.capture_format != .RGB24 && (output_format == .NV12 || output_format == .P010) do minimum_length = minimum_length*3/2
-	if pitch < default_pitch || u64(current_length) < minimum_length do return
-	if failed(r.capture_mutex.AcquireSync(r.capture_mutex, 0, 0)) do return
+	if data == nil || current_length > max_length do return false
+	pitch, valid := capture_upload_pitch(r.capture_format, r.capture_width, r.capture_height, r.capture_stride, current_length)
+	if !valid do return false
 	destination := r.processed_texture if r.capture_format == .RGB24 else r.capture_texture
 	r.capture_context_11.UpdateSubresource(r.capture_context_11, cast(^d3d11.IResource)destination, 0, nil, rawptr(data), pitch, current_length)
 	flip := u32(1) if r.capture_format == .RGB24 && r.capture_stride < 0 else u32(0)
 	sync.atomic_store_explicit(&r.video_vertical_flip, flip, .Release)
-	if capture_process_uploaded_frame(r) {
-		capture_publish_frame(r)
-	}
-	return
+	return true
 }
 
 capture_process_uploaded_frame :: proc(r: ^Renderer) -> bool {
-	if r.capture_format == .RGB24 {
-		r.capture_mutex.ReleaseSync(r.capture_mutex, 1)
-		return true
-	}
+	if r.capture_format == .RGB24 do return true
 	stream := d3d11.VIDEO_PROCESSOR_STREAM{Enable = true, pInputSurface = r.video_input_view}
-	hr := r.video_context.VideoProcessorBlt(r.video_context, r.video_processor, r.video_output_view, 0, 1, &stream)
-	r.capture_mutex.ReleaseSync(r.capture_mutex, 1)
-	return !failed(hr)
+	return !failed(r.video_context.VideoProcessorBlt(r.video_context, r.video_processor, r.video_output_view, 0, 1, &stream))
 }
 
-capture_publish_frame :: proc(r: ^Renderer) {
-	sync.atomic_add_explicit(&r.video_sequence, 1, .Release)
-	// Keep the renderer on the window thread and allow at most one queued
-	// wake-up. Custom messages are serviced by the modal move/resize loop,
-	// unlike an external event loop that Windows pauses while dragging.
-	renderer_request_redraw(r)
+capture_upload_pitch :: proc(format: Capture_Format, width, height: u32, stride: i32, length: u32) -> (u32, bool) {
+	if width == 0 || height == 0 do return 0, false
+	planar := format == .NV12 || format == .P010 || format == .I420 || format == .MJPEG
+	if planar && (width%2 != 0 || height%2 != 0 || stride < 0) do return 0, false
+	if format == .YUY2 && (width%2 != 0 || stride < 0) do return 0, false
+	row_bytes := u64(width)
+	if format == .P010 || format == .YUY2 do row_bytes *= 2
+	if format == .RGB24 do row_bytes *= 4
+	pitch := u64(abs(i64(stride))) if stride != 0 else row_bytes
+	rows := u64(height)
+	if planar do rows += u64(height)/2
+	// Division avoids overflow even for malformed dimensions and strides.
+	if pitch < row_bytes || pitch > u64(length)/rows do return 0, false
+	return u32(pitch), true
 }
 
 utf16_contains_ascii_case_insensitive :: proc(text: ^u16, length: u32, needle: string) -> bool {

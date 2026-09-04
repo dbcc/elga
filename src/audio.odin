@@ -124,6 +124,8 @@ audio_open_device :: proc(a: ^Audio_State, output_index: int) -> bool {
 }
 
 audio_select_output :: proc(a: ^Audio_State, output_index: int) -> bool {
+	if !a.context_ready || output_index < -1 || output_index >= a.output_count do return false
+	if a.device_ready && output_index == a.selected_output do return true
 	old_index := a.selected_output
 	if audio_open_device(a, output_index) do return true
 	if old_index != output_index && audio_open_device(a, old_index) do return false
@@ -286,6 +288,8 @@ audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_cou
 
 audio_apply_volume_samples :: proc "contextless" (output, input: []f32, volume_percent: u32, muted: bool) {
 	sample_count := min(len(output), len(input))
+	// The callback disables Miniaudio's pre-silencing, so fill every output sample.
+	if len(output) > sample_count do mem.zero(raw_data(output[sample_count:]), (len(output)-sample_count)*size_of(f32))
 	if muted || volume_percent == 0 {
 		mem.zero(raw_data(output[:sample_count]), sample_count*size_of(f32))
 		return

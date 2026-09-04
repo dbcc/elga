@@ -18,6 +18,7 @@ UI_TIMER           :: 1
 FRAME_READY_MESSAGE :: win32.WM_APP + 1
 UI_ACTION_MESSAGE   :: win32.WM_APP + 2
 CAPTURE_FAILED_MESSAGE :: win32.WM_APP + 3
+CAPTURE_READY_MESSAGE  :: win32.WM_APP + 4
 ELGA_FULLSCREEN_STRESS :: #config(ELGA_FULLSCREEN_STRESS, false)
 ELGA_FORMAT_STRESS     :: #config(ELGA_FORMAT_STRESS, false)
 
@@ -187,6 +188,11 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		renderer_handle_capture_failure(&app.renderer, u32(wparam))
 		if app.renderer.ready do renderer_draw(&app.renderer)
 		return 0
+	case CAPTURE_READY_MESSAGE:
+		if u32(wparam) == sync.atomic_load_explicit(&app.renderer.capture_generation, .Acquire) {
+			renderer_reconcile_auto_capture(&app.renderer)
+		}
+		return 0
 	case win32.WM_SIZE:
 		if app.renderer.ready && wparam == win32.SIZE_MINIMIZED {
 			renderer_suspend_capture(&app.renderer)
@@ -294,6 +300,7 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 			return 1
 		}
 	case win32.WM_KEYDOWN:
+		if lparam & (win32.LPARAM(1)<<30) != 0 do return 0
 		switch u32(wparam) {
 		case u32('F'), win32.VK_F11:
 			toggle_fullscreen()
@@ -448,22 +455,21 @@ format_stress_tick :: proc() {
 }
 
 enforce_16_9 :: proc(rect: ^win32.RECT, edge: u32) {
+	enforce_16_9_for_dpi(rect, edge, win32.GetDpiForWindow(app.hwnd))
+}
+
+enforce_16_9_for_dpi :: proc(rect: ^win32.RECT, edge, dpi: u32) {
 	if rect == nil do return
 	outer_w := rect.right - rect.left
 	outer_h := rect.bottom - rect.top
-	dpi := win32.GetDpiForWindow(app.hwnd)
 	minimum_width := MIN_CLIENT_W*i32(dpi)/i32(win32.USER_DEFAULT_SCREEN_DPI)
 	minimum_height := MIN_CLIENT_H*i32(dpi)/i32(win32.USER_DEFAULT_SCREEN_DPI)
 	client_w := max(outer_w, minimum_width)
 	client_h := max(outer_h, minimum_height)
 
-	// Left/right drags are width-led; top/bottom and corners use the
-	// dimension that moved farthest from the required aspect ratio.
-	width_led := edge == win32.WMSZ_LEFT || edge == win32.WMSZ_RIGHT
-	if !width_led {
-		expected_h := client_w * ASPECT_DEN / ASPECT_NUM
-		width_led = abs(client_h - expected_h) < abs(client_w - client_h * ASPECT_NUM / ASPECT_DEN)
-	}
+	// Vertical edges follow height; horizontal edges and corners follow width.
+	// Comparing aspect-ratio errors always favors width because 16/9 > 1.
+	width_led := edge != win32.WMSZ_TOP && edge != win32.WMSZ_BOTTOM
 	if width_led {
 		client_h = max(client_w * ASPECT_DEN / ASPECT_NUM, minimum_height)
 	} else {

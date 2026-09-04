@@ -106,6 +106,10 @@ order for otherwise equal modes. The shared video texture is recreated at the
 native capture size, so lower-resolution modes do not retain a 4K allocation.
 The capture control thread is event-driven and remains asleep unless capture
 must stop or recover.
+Startup resolves Auto against the enumerated device modes. Recovery waits for
+Media Foundation's flush callback, and shutdown detaches outstanding callbacks
+before releasing capture resources. Unused source streams are deselected so
+unread samples do not accumulate.
 Native NV12, P010, and YUY2 frames remain GPU-to-GPU. I420 is converted and
 MJPEG is decoded to NV12; RGB24 is expanded to 32-bit RGB without crossing into
 YUV. Transformed frames stay on the GPU when the selected Windows
@@ -123,6 +127,8 @@ color-range policy. The GPU-native hot path has no CPU frame download,
 CPU-side RGBA conversion, or CPU-to-GPU texture upload.
 When the output viewport covers the client area, the renderer also skips the
 otherwise redundant full-surface clear before drawing the video frame.
+Busy capture frames are dropped before buffer preparation. Repaints can reuse
+the last completed shared frame, keeping controls responsive when HDMI stalls.
 
 The 4K X's 4K144 NV12 media type advertises full range even though its sample
 values are video range. The viewer does not copy that contradictory flag into

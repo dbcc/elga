@@ -25,11 +25,22 @@ Run these before opening a pull request:
 
 ```powershell
 odin check src -vet -strict-style
+odin test src -vet -strict-style -out:build/elga-tests.exe
 odin check src -vet -define:ELGA_FULLSCREEN_STRESS=true -define:ELGA_FORMAT_STRESS=true
 .\build.ps1 -Configuration Release
 ```
 
 The stress defines compile the fullscreen and capture-format transition paths.
+On a machine with a D3D11 video-capable GPU, also run the synthetic pixel tests:
+
+```powershell
+odin test src -vet -strict-style -define:ELGA_GPU_TESTS=true -out:build/elga-gpu-tests.exe
+```
+
+These check all six presentation formats through software buffers and padded
+DXGI surfaces, shared-texture ownership, and GPU readback. They do not require a
+capture card and do not test device negotiation or Windows decoding transforms.
+
 If you have an Elgato 4K X, also exercise the affected formats and resolutions
 on hardware. Include the tested Windows version, GPU, driver, USB connection,
 format, resolution, and frame rate in the pull request.

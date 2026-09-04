@@ -225,14 +225,18 @@ wake_health_thread_proc :: proc(t: ^thread.Thread) {
 }
 
 wake_probe :: proc(w: ^Wake_Control) -> (online: bool, error: Wake_Error, http_status: u32) {
-	error = .Transfer
+	return wake_http_request(w, SWITCH_WAKE_HEALTH_URL, false)
+}
+
+// Both requests use identical timeouts, cancellation, and status handling.
+wake_http_request :: proc(w: ^Wake_Control, url: cstring, post: bool) -> (ok: bool, error: Wake_Error, http_status: u32) {
 	easy := curl.easy_init()
 	if easy == nil {
 		return false, .Curl_Easy_Init, 0
 	}
 	defer curl.easy_cleanup(easy)
 
-	options_ok := curl.easy_setopt(easy, .URL, SWITCH_WAKE_HEALTH_URL) == .E_OK &&
+	options_ok := curl.easy_setopt(easy, .URL, url) == .E_OK &&
 		curl.easy_setopt(easy, .CONNECTTIMEOUT_MS, c.long(5000)) == .E_OK &&
 		curl.easy_setopt(easy, .TIMEOUT_MS, c.long(8000)) == .E_OK &&
 		curl.easy_setopt(easy, .NOSIGNAL, c.long(1)) == .E_OK &&
@@ -241,6 +245,10 @@ wake_probe :: proc(w: ^Wake_Control) -> (online: bool, error: Wake_Error, http_s
 		curl.easy_setopt(easy, .XFERINFOFUNCTION, wake_cancel_transfer) == .E_OK &&
 		curl.easy_setopt(easy, .XFERINFODATA, w) == .E_OK &&
 		curl.easy_setopt(easy, .WRITEFUNCTION, wake_discard_response) == .E_OK
+	if options_ok && post {
+		options_ok = curl.easy_setopt(easy, .POST, c.long(1)) == .E_OK &&
+			curl.easy_setopt(easy, .POSTFIELDSIZE, c.long(0)) == .E_OK
+	}
 	if !options_ok {
 		return false, .Curl_Setup, 0
 	}
@@ -249,51 +257,17 @@ wake_probe :: proc(w: ^Wake_Control) -> (online: bool, error: Wake_Error, http_s
 	response_code: c.long
 	info_result := curl.easy_getinfo(easy, .RESPONSE_CODE, &response_code)
 	if response_code > 0 do http_status = u32(response_code)
-	online = result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300
-	if online do return true, .None, http_status
+	ok = result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300
+	if ok do return true, .None, http_status
 	return false, wake_classify_error(result, info_result), http_status
 }
 
 wake_request_thread_proc :: proc(t: ^thread.Thread) {
 	w := cast(^Wake_Control)t.data
 	if w == nil do return
-	succeeded := false
-	error := Wake_Error.Transfer
-	http_status: u32
+	succeeded, error, http_status := wake_http_request(w, SWITCH_WAKE_URL, true)
 	defer wake_set_result(w, .Success if succeeded else .Failed, .None if succeeded else error, http_status)
-
-	easy := curl.easy_init()
-	if easy == nil {
-		error = .Curl_Easy_Init
-		fmt.eprintln("Switch wake: could not create curl request")
-		return
-	}
-	defer curl.easy_cleanup(easy)
-
-	options_ok := curl.easy_setopt(easy, .URL, SWITCH_WAKE_URL) == .E_OK &&
-		curl.easy_setopt(easy, .POST, c.long(1)) == .E_OK &&
-		curl.easy_setopt(easy, .POSTFIELDSIZE, c.long(0)) == .E_OK &&
-		curl.easy_setopt(easy, .CONNECTTIMEOUT_MS, c.long(5000)) == .E_OK &&
-		curl.easy_setopt(easy, .TIMEOUT_MS, c.long(8000)) == .E_OK &&
-		curl.easy_setopt(easy, .NOSIGNAL, c.long(1)) == .E_OK &&
-		curl.easy_setopt(easy, .FAILONERROR, c.long(1)) == .E_OK &&
-		curl.easy_setopt(easy, .NOPROGRESS, c.long(0)) == .E_OK &&
-		curl.easy_setopt(easy, .XFERINFOFUNCTION, wake_cancel_transfer) == .E_OK &&
-		curl.easy_setopt(easy, .XFERINFODATA, w) == .E_OK &&
-		curl.easy_setopt(easy, .WRITEFUNCTION, wake_discard_response) == .E_OK
-	if !options_ok {
-		error = .Curl_Setup
-		fmt.eprintln("Switch wake: could not configure curl request")
-		return
-	}
-
-	result := curl.easy_perform(easy)
-	response_code: c.long
-	info_result := curl.easy_getinfo(easy, .RESPONSE_CODE, &response_code)
-	if response_code > 0 do http_status = u32(response_code)
-	succeeded = result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300
 	if !succeeded {
-		error = wake_classify_error(result, info_result)
 		if error != .Cancelled do wake_set_health(w, false, error, http_status)
 	} else {
 		wake_set_health(w, true, .None, http_status)
@@ -301,7 +275,7 @@ wake_request_thread_proc :: proc(t: ^thread.Thread) {
 	if succeeded {
 		fmt.eprintln("Switch wake: request sent")
 	} else {
-		fmt.eprintf("Switch wake: request failed (%s, HTTP %d)\n", curl.easy_strerror(result), response_code)
+		fmt.eprintf("Switch wake: request failed (%v, HTTP %d)\n", error, http_status)
 	}
 }
 

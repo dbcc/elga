@@ -21,6 +21,27 @@ audio_volume_samples_test :: proc(t: ^testing.T) {
 
 	audio_apply_volume_samples(output[:], input[:], 75, true)
 	testing.expect_value(t, output, [4]f32{})
+
+	volumes := []u32{0, 50, 100}
+	for volume in volumes {
+		output = {9, 9, 9, 9}
+		audio_apply_volume_samples(output[:], input[:2], volume, false)
+		testing.expect_value(t, output[2], f32(0))
+		testing.expect_value(t, output[3], f32(0))
+	}
+	output = {9, 9, 9, 9}
+	audio_apply_volume_samples(output[:], nil, 100, false)
+	testing.expect_value(t, output, [4]f32{})
+}
+
+@(test)
+audio_output_selection_noop_test :: proc(t: ^testing.T) {
+	audio := Audio_State{context_ready = true, device_ready = true, selected_output = -1}
+	// No real device exists in this fixture: these paths must not touch WASAPI.
+	testing.expect(t, audio_select_output(&audio, -1))
+	testing.expect(t, !audio_select_output(&audio, -2))
+	testing.expect(t, !audio_select_output(&audio, 0))
+	testing.expect(t, audio.device_ready)
 }
 
 @(test)
