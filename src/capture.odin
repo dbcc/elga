@@ -86,14 +86,21 @@ source_reader_on_read_sample :: proc "system" (this: ^IMFSourceReaderCallback, s
 	r := callback.renderer
 	if r == nil || !sync.atomic_load_explicit(&r.capture_running, .Acquire) do return win32.HRESULT(win32.S_OK)
 	if !failed(status) && sample != nil {
+		capture_health_note_sample(&r.health)
 		capture_copy_sample(r, sample)
-	} else if failed(status) && sync.atomic_load_explicit(&r.capture_running, .Acquire) {
+	} else if failed(status) && sync.atomic_load_explicit(&r.capture_running, .Acquire) &&
+	          sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) == 0 {
+		sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
 		capture_request_refresh(r)
 	}
 	if sync.atomic_load_explicit(&r.capture_running, .Acquire) &&
-	   sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 {
+	   sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 &&
+	   sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) == 0 {
 		read_hr := callback.reader.ReadSample(callback.reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil)
-		if failed(read_hr) do capture_request_refresh(r)
+		if failed(read_hr) {
+			sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
+			capture_request_refresh(r)
+		}
 	}
 	return win32.HRESULT(win32.S_OK)
 }
@@ -134,17 +141,25 @@ Video_Range :: enum u8 {
 }
 
 capture_request_refresh :: proc(r: ^Renderer) {
-	sync.atomic_store_explicit(&r.capture_refresh, 1, .Release)
+	if sync.atomic_exchange_explicit(&r.capture_refresh, 1, .Acq_Rel) == 0 {
+		capture_health_note_recovery(&r.health)
+	}
 	if r.capture_event != nil do win32.SetEvent(r.capture_event)
 }
 
 capture_start :: proc(r: ^Renderer) -> bool {
 	if r.capture_thread != nil do return true
+	capture_health_reset_timing(r)
 	sync.atomic_store_explicit(&r.capture_ready, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_refresh, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Release)
 	sync.atomic_store_explicit(&r.source_mode_count, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
+	sync.atomic_store_explicit(&r.edid_request_kind, u32(EDID_Request_Kind.None), .Release)
+	sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+	sync.atomic_store_explicit(&r.edid_mode_known, 0, .Relaxed)
+	sync.atomic_store_explicit(&r.edid_error, u32(EDID_Protocol_Error.None), .Relaxed)
+	sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Reading), .Release)
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)
 	if r.capture_event == nil {
 		fmt.eprintln("Capture control event creation failed")
@@ -193,6 +208,7 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 		sync.atomic_store_explicit(&r.capture_ready, 0, .Release)
 		sync.atomic_store_explicit(&r.capture_running, false, .Release)
 		if unexpected_stop {
+			sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
 			win32.PostMessageW(r.hwnd, CAPTURE_FAILED_MESSAGE, win32.WPARAM(generation), 0)
 		}
 	}
@@ -217,7 +233,7 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	defer com_release(callback)
 	callback.flush_event = win32.CreateEventW(nil, false, false, nil)
 	if callback.flush_event == nil do return
-	reader, source, mode, ok := capture_open_reader(r, cast(^IMFSourceReaderCallback)callback)
+	reader, source, mode, edid_identity_verified, ok := capture_open_reader(r, cast(^IMFSourceReaderCallback)callback)
 	defer com_release(source)
 	defer {
 		if source != nil do source.Shutdown(source)
@@ -225,8 +241,44 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	defer com_release(reader)
 	defer source_reader_detach(callback)
 	if !ok {
+		sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unavailable), .Release)
 		fmt.eprintln("Elgato 4K X capture initialization failed")
 		return
+	}
+	edid_controller: EDID_Windows_Controller
+	edid_available := false
+	edid_current := EDID_Mode.Internal
+	edid_error := EDID_Protocol_Error.Unsupported
+	if edid_identity_verified {
+		edid_controller, edid_current, edid_error, edid_available = edid_windows_open(source, r)
+	}
+	defer edid_windows_close(&edid_controller)
+	edid_transport := edid_windows_transport(&edid_controller)
+	if edid_available {
+		if generation == sync.atomic_load_explicit(&r.capture_generation, .Acquire) {
+			sync.atomic_store_explicit(&r.edid_error, u32(edid_error), .Relaxed)
+			verification_required := sync.atomic_load_explicit(&r.edid_verification_required, .Acquire) != 0
+			if edid_error == .None && !verification_required {
+				sync.atomic_store_explicit(&r.edid_mode, u32(edid_current), .Relaxed)
+				sync.atomic_store_explicit(&r.edid_mode_known, 1, .Relaxed)
+				sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Ready), .Release)
+				fmt.eprintf("EDID protocol verified: node=%d mode=%s\n", edid_controller.node_id, edid_mode_name(edid_current))
+			} else if verification_required {
+				sync.atomic_store_explicit(&r.edid_error, u32(EDID_Protocol_Error.Readback_Failed), .Relaxed)
+				sync.atomic_store_explicit(&r.edid_mode_known, 0, .Relaxed)
+				sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unknown), .Release)
+				fmt.eprintln("EDID write remains unverified; explicit refresh required")
+			} else {
+				sync.atomic_store_explicit(&r.edid_mode_known, 0, .Relaxed)
+				sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unavailable), .Release)
+				fmt.eprintf("EDID protocol validation failed: %v\n", edid_error)
+			}
+		}
+	} else {
+		sync.atomic_store_explicit(&r.edid_error, u32(EDID_Protocol_Error.Unsupported), .Relaxed)
+		sync.atomic_store_explicit(&r.edid_mode_known, 0, .Relaxed)
+		sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unavailable), .Release)
+		fmt.eprintln("EDID extension unavailable on the selected capture source")
 	}
 	if mode.width != r.resource_width || mode.height != r.resource_height {
 		fmt.eprintf("Capture/resource size mismatch: %dx%d vs %dx%d\n", mode.width, mode.height, r.resource_width, r.resource_height)
@@ -242,7 +294,6 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	video_processor_set_color(r)
 	callback.reader = reader
 	sync.atomic_store_explicit(&r.capture_ready, 1, .Release)
-	win32.PostMessageW(r.hwnd, CAPTURE_READY_MESSAGE, win32.WPARAM(generation), 0)
 	path := capture_format_pipeline_name(mode.format)
 	presentation := "D3D11 copy" if mode.format == .RGB24 else "D3D11 video processor"
 	fmt.eprintf("Capture ready: %dx%d @ %.3f FPS, %s, %s range (%s -> %s -> D3D11)\n", mode.width, mode.height, f64(mode.fps_num)/f64(mode.fps_den), capture_format_name(mode.format), video_range_name(mode.range), path, presentation)
@@ -252,9 +303,56 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 		fmt.eprintf("Media Foundation asynchronous ReadSample failed: 0x%08x\n", u32(hr))
 		return
 	}
+	win32.PostMessageW(r.hwnd, CAPTURE_READY_MESSAGE, win32.WPARAM(generation), 0)
 	for sync.atomic_load_explicit(&r.capture_running, .Acquire) {
 		if win32.WaitForSingleObject(r.capture_event, win32.INFINITE) != win32.WAIT_OBJECT_0 do break
 		if !sync.atomic_load_explicit(&r.capture_running, .Acquire) do break
+		request_kind := EDID_Request_Kind.None
+		if sync.atomic_load_explicit(&r.edid_request_kind, .Acquire) != u32(EDID_Request_Kind.None) {
+			// Publish active before removing the mailbox entry so the UI never
+			// observes a false idle window between the two states.
+			sync.atomic_store_explicit(&r.edid_operation_active, 1, .Release)
+			request_kind = EDID_Request_Kind(sync.atomic_exchange_explicit(&r.edid_request_kind, u32(EDID_Request_Kind.None), .Acq_Rel))
+		}
+		if request_kind != .None {
+			request_id := sync.atomic_load_explicit(&r.edid_request_id, .Acquire)
+			request_generation := sync.atomic_load_explicit(&r.edid_request_generation, .Acquire)
+			if request_generation != generation || !edid_available {
+				sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+				renderer_publish_edid_result(r, EDID_Result{
+					request_id = request_id,
+					generation = request_generation,
+					error = .Unsupported,
+				})
+				continue
+			}
+			// Stop the callback chain, drain any callback already executing, then
+			// cancel the one outstanding asynchronous read before touching KS.
+			sync.mutex_lock(&callback.mutex)
+			sync.mutex_unlock(&callback.mutex)
+			flush_ok := !failed(reader.Flush(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM)) && capture_wait_for_flush(r, callback)
+			result := EDID_Result{request_id = request_id, generation = generation}
+			if !flush_ok {
+				result.error = .Transfer_Failed
+			} else if request_kind == .Refresh {
+				result.mode, result.error = edid_read_mode(&edid_transport)
+				result.mode_known = result.error == .None
+			} else {
+				requested := EDID_Mode(sync.atomic_load_explicit(&r.edid_requested_mode, .Acquire))
+				result.mode, result.mode_known, result.disposition, result.error = edid_set_mode(&edid_transport, requested)
+			}
+			sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+			renderer_publish_edid_result(r, result)
+			if !edid_requires_reconnect(result.disposition) && sync.atomic_load_explicit(&r.capture_running, .Acquire) &&
+			   sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 {
+				hr = reader.ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil)
+				if failed(hr) {
+					sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
+					capture_request_refresh(r)
+				}
+			}
+			continue
+		}
 		if sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 do continue
 		// Drain any callback that could still be issuing ReadSample before Flush.
 		sync.mutex_lock(&callback.mutex)
@@ -266,12 +364,15 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 		if sync.atomic_load_explicit(&r.capture_running, .Acquire) {
 			sync.atomic_store_explicit(&r.capture_refresh, 0, .Release)
 			hr = reader.ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil)
-			if failed(hr) do capture_request_refresh(r)
+			if failed(hr) {
+				sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
+				capture_request_refresh(r)
+			}
 		}
 	}
 }
 
-capture_open_reader :: proc(r: ^Renderer, callback: ^IMFSourceReaderCallback) -> (reader: ^IMFSourceReader, source: ^IMFMediaSource, selected_mode: Capture_Mode, ok: bool) {
+capture_open_reader :: proc(r: ^Renderer, callback: ^IMFSourceReaderCallback) -> (reader: ^IMFSourceReader, source: ^IMFMediaSource, selected_mode: Capture_Mode, edid_identity_verified: bool, ok: bool) {
 	enum_attributes: ^IMFAttributes
 	if failed(MFCreateAttributes(&enum_attributes, 1)) do return
 	defer com_release(enum_attributes)
@@ -290,8 +391,21 @@ capture_open_reader :: proc(r: ^Renderer, callback: ^IMFSourceReaderCallback) ->
 		name_len: u32
 		attributes := cast(^IMFAttributes)device
 		if !failed(attributes.GetAllocatedString(attributes, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &name_len)) {
-			if activation == nil && utf16_contains_ascii_case_insensitive(name, name_len, "elgato 4k x") {
+			identity_matches := utf16_contains_ascii_case_insensitive(name, name_len, "4k x")
+			device_supports_edid := false
+			if identity_matches {
+				symbolic_link: ^u16
+				symbolic_link_len: u32
+				if !failed(attributes.GetAllocatedString(attributes, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &symbolic_link, &symbolic_link_len)) {
+					device_supports_edid = utf16_contains_ascii_case_insensitive(symbolic_link, symbolic_link_len, "vid_0fd9") &&
+						(utf16_contains_ascii_case_insensitive(symbolic_link, symbolic_link_len, "pid_009b") ||
+						 utf16_contains_ascii_case_insensitive(symbolic_link, symbolic_link_len, "pid_009c"))
+					win32.CoTaskMemFree(rawptr(symbolic_link))
+				}
+			}
+			if activation == nil && identity_matches {
 				activation = device
+				edid_identity_verified = device_supports_edid
 			} else {
 				com_release(device)
 			}
@@ -401,7 +515,7 @@ capture_enumerate_modes :: proc(reader: ^IMFSourceReader, requested: Capture_For
 		if format != requested || count >= len(r.capture_mode_indices) do continue
 
 		insert := count
-		for insert > 0 && mode_better(mode, r.source_modes[int(r.capture_mode_indices[insert-1])]) {
+		for insert > 0 && mode_better(mode, r.source_modes[int(r.capture_mode_indices[insert-1])], r.requested_width == 0) {
 			r.capture_mode_indices[insert] = r.capture_mode_indices[insert-1]
 			insert -= 1
 		}
@@ -498,7 +612,7 @@ capture_pick_auto_format :: proc(r: ^Renderer, width, height: u32) -> (Capture_F
 		mode := r.source_modes[i]
 		if !capture_format_is_gpu(mode.format) do continue
 		if width != 0 && (mode.width != width || mode.height != height) do continue
-		if !found || mode_better(mode, best) {
+		if !found || mode_better(mode, best, width == 0) {
 			best = mode
 			found = true
 		}
@@ -506,14 +620,14 @@ capture_pick_auto_format :: proc(r: ^Renderer, width, height: u32) -> (Capture_F
 	return best.format, found
 }
 
-capture_pick_best_mode_for_format :: proc(r: ^Renderer, format: Capture_Format) -> (Capture_Mode, bool) {
+capture_pick_best_mode_for_format :: proc(r: ^Renderer, format: Capture_Format, prefer_uhd_60 := false) -> (Capture_Mode, bool) {
 	count := int(sync.atomic_load_explicit(&r.source_mode_count, .Acquire))
 	best: Capture_Mode
 	found := false
 	for i in 0..<count {
 		mode := r.source_modes[i]
 		if mode.format != format do continue
-		if !found || mode_better(mode, best) {
+		if !found || mode_better(mode, best, prefer_uhd_60) {
 			best = mode
 			found = true
 		}
@@ -553,20 +667,38 @@ video_range_name :: proc(video_range: Video_Range) -> string {
 	return "unknown"
 }
 
-mode_better :: proc(a, b: Capture_Mode) -> bool {
+mode_better :: proc(a, b: Capture_Mode, prefer_uhd_60 := false) -> bool {
 	a_pixels := u64(a.width)*u64(a.height)
 	b_pixels := u64(b.width)*u64(b.height)
 	if a_pixels != b_pixels do return a_pixels > b_pixels
+	if prefer_uhd_60 && a.width >= 3840 && a.height >= 2160 {
+		// The 4K X advertises high-rate USB capture modes independently of the
+		// HDMI timing. Requesting 4K144 for a 4K60 input only makes the card emit
+		// duplicate samples. Prefer the highest rate at or below 60 Hz. If no
+		// such mode exists, use the lowest advertised rate rather than asking the
+		// card to synthesize still more frames.
+		a_at_most_60 := u64(a.fps_num) <= 60*u64(a.fps_den)
+		b_at_most_60 := u64(b.fps_num) <= 60*u64(b.fps_den)
+		if a_at_most_60 != b_at_most_60 do return a_at_most_60
+		if !a_at_most_60 {
+			return u64(a.fps_num)*u64(b.fps_den) < u64(b.fps_num)*u64(a.fps_den)
+		}
+	}
 	return u64(a.fps_num)*u64(b.fps_den) > u64(b.fps_num)*u64(a.fps_den)
 }
 
 capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
 	// Drop a busy frame before querying COM buffers or merging software samples.
-	if !video_mutex_acquire(r.capture_mutex, 0) do return
+	if !video_mutex_acquire(r.capture_mutex, 0) {
+		sync.atomic_add_explicit(&r.health.busy_drops, 1, .Relaxed)
+		return
+	}
 	ok := capture_upload_sample(r, sample) && capture_process_uploaded_frame(r)
 	if ok {
 		// Publish metadata while the matching texture is exclusively owned.
 		sync.atomic_add_explicit(&r.video_sequence, 1, .Release)
+	} else {
+		sync.atomic_add_explicit(&r.health.upload_errors, 1, .Relaxed)
 	}
 	// Failed uploads/conversions leave the capture key available for a retry.
 	r.capture_mutex.ReleaseSync(r.capture_mutex, 1 if ok else 0)
@@ -612,9 +744,25 @@ capture_upload_sample :: proc(r: ^Renderer, sample: ^IMFSample) -> bool {
 		com_release(texture)
 	}
 
-	// Software transforms can return a normal IMFMediaBuffer even with a D3D
-	// manager configured. Upload that converted surface to the same default
-	// texture used by the zero-copy path.
+	// Read 2D software surfaces in place. IMFMediaBuffer.Lock can allocate a
+	// packed copy and copy it back on Unlock; a read-only 2D lock avoids that
+	// work and supplies the actual surface pitch instead of media-type metadata.
+	buffer_2d: ^IMF2DBuffer2
+	if !failed(buffer.QueryInterface(buffer, IID_IMF2DBuffer2, cast(^rawptr)&buffer_2d)) {
+		defer com_release(buffer_2d)
+		scanline, buffer_start: ^u8
+		stride: i32
+		length: u32
+		if !failed(buffer_2d.Lock2DSize(buffer_2d, MF2DBuffer_LockFlags_Read, &scanline, &stride, &buffer_start, &length)) {
+			defer buffer_2d.Unlock2D(buffer_2d)
+			data, pitch, valid := capture_upload_2d_data(r.capture_format, r.capture_width, r.capture_height, stride, scanline, buffer_start, length)
+			if !valid do return false
+			capture_upload_pixels(r, data, pitch, stride < 0)
+			return true
+		}
+	}
+
+	// Plain software buffers still use the contiguous fallback.
 	data: ^u8
 	max_length, current_length: u32
 	if failed(buffer.Lock(buffer, &data, &max_length, &current_length)) do return false
@@ -622,11 +770,35 @@ capture_upload_sample :: proc(r: ^Renderer, sample: ^IMFSample) -> bool {
 	if data == nil || current_length > max_length do return false
 	pitch, valid := capture_upload_pitch(r.capture_format, r.capture_width, r.capture_height, r.capture_stride, current_length)
 	if !valid do return false
-	destination := r.processed_texture if r.capture_format == .RGB24 else r.capture_texture
-	r.capture_context_11.UpdateSubresource(r.capture_context_11, cast(^d3d11.IResource)destination, 0, nil, rawptr(data), pitch, current_length)
-	flip := u32(1) if r.capture_format == .RGB24 && r.capture_stride < 0 else u32(0)
-	sync.atomic_store_explicit(&r.video_vertical_flip, flip, .Release)
+	capture_upload_pixels(r, data, pitch, r.capture_stride < 0)
 	return true
+}
+
+capture_upload_pixels :: proc(r: ^Renderer, data: ^u8, pitch: u32, bottom_up: bool) {
+	destination := r.processed_texture if r.capture_format == .RGB24 else r.capture_texture
+	// SrcDepthPitch is unused for these 2D textures.
+	r.capture_context_11.UpdateSubresource(r.capture_context_11, cast(^d3d11.IResource)destination, 0, nil, rawptr(data), pitch, 0)
+	flip := u32(1) if r.capture_format == .RGB24 && bottom_up else u32(0)
+	sync.atomic_store_explicit(&r.video_vertical_flip, flip, .Release)
+}
+
+capture_upload_2d_data :: proc(format: Capture_Format, width, height: u32, stride: i32, scanline, buffer_start: ^u8, length: u32) -> (data: ^u8, pitch: u32, valid: bool) {
+	if scanline == nil || buffer_start == nil || height == 0 || stride == 0 do return
+	start_address := uintptr(buffer_start)
+	scanline_address := uintptr(scanline)
+	if scanline_address < start_address do return
+	offset := u64(scanline_address-start_address)
+	if offset > u64(length) do return
+	if stride < 0 {
+		// Lock2DSize returns the displayed top row, which is last in memory for
+		// bottom-up RGB. Upload from the lowest row and let the shader flip it.
+		preceding_rows := u64(abs(i64(stride)))*u64(height-1)
+		if preceding_rows > offset do return
+		offset -= preceding_rows
+	}
+	pitch, valid = capture_upload_pitch(format, width, height, stride, length-u32(offset))
+	if valid do data = cast(^u8)(start_address+uintptr(offset))
+	return
 }
 
 capture_process_uploaded_frame :: proc(r: ^Renderer) -> bool {
@@ -646,8 +818,10 @@ capture_upload_pitch :: proc(format: Capture_Format, width, height: u32, stride:
 	pitch := u64(abs(i64(stride))) if stride != 0 else row_bytes
 	rows := u64(height)
 	if planar do rows += u64(height)/2
-	// Division avoids overflow even for malformed dimensions and strides.
-	if pitch < row_bytes || pitch > u64(length)/rows do return 0, false
+	// Only the final row's pixels must be readable; trailing padding need not
+	// exist. Division avoids overflow for malformed dimensions and strides.
+	if pitch < row_bytes || row_bytes > u64(length) do return 0, false
+	if rows > 1 && pitch > (u64(length)-row_bytes)/(rows-1) do return 0, false
 	return u32(pitch), true
 }
 
@@ -667,4 +841,17 @@ utf16_contains_ascii_case_insensitive :: proc(text: ^u16, length: u32, needle: s
 		if matches do return true
 	}
 	return false
+}
+
+utf16_equals_ascii_case_insensitive :: proc(text: ^u16, length: u32, expected: string) -> bool {
+	if text == nil || int(length) != len(expected) do return false
+	chars := cast([^]u16)text
+	for i in 0..<len(expected) {
+		actual := chars[i]
+		if actual >= 'A' && actual <= 'Z' do actual += 'a'-'A'
+		expected_char := u16(expected[i])
+		if expected_char >= 'A' && expected_char <= 'Z' do expected_char += 'a'-'A'
+		if actual != expected_char do return false
+	}
+	return true
 }

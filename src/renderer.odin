@@ -20,6 +20,31 @@ Renderer :: struct {
 	hwnd:           win32.HWND,
 	width:          u32,
 	height:         u32,
+	pending_width:  u32,
+	pending_height: u32,
+	drawing:        bool,
+	suspend_requested: bool,
+	redraw_retry_pending: bool,
+	health: Capture_Health,
+	reconnect_thread: ^thread.Thread,
+	reconnect_done: u32,
+	reconnect_error: bool,
+	edid_status: u32,
+	edid_error: u32,
+	edid_mode: u32,
+	edid_mode_known: u32,
+	edid_request_kind: u32,
+	edid_request_id: u32,
+	edid_request_generation: u32,
+	edid_requested_mode: u32,
+	edid_operation_active: u32,
+	edid_result_pending: u32,
+	edid_result_id: u32,
+	edid_result_generation: u32,
+	edid_result_disposition: u32,
+	edid_restore_pending: u32,
+	edid_notice: u32,
+	edid_verification_required: u32,
 	device_11:      ^d3d11.IDevice,
 	context_11:     ^d3d11.IDeviceContext,
 	capture_device_11:  ^d3d11.IDevice,
@@ -47,9 +72,9 @@ Renderer :: struct {
 	sampler:        ^d3d11.ISamplerState,
 	rasterizer:     ^d3d11.IRasterizerState,
 	letterboxed:    bool,
+	video_top_inset: u32,
 	video_sequence: u64,
 	video_vertical_flip: u32,
-	redraw_pending: u32,
 	capture_running: bool,
 	capture_ready:   u32,
 	capture_refresh: u32,
@@ -94,11 +119,23 @@ Renderer :: struct {
 
 renderer_request_redraw :: proc(r: ^Renderer) {
 	if r == nil || r.hwnd == nil do return
-	if sync.atomic_exchange_explicit(&r.redraw_pending, 1, .Relaxed) == 0 {
-		if !bool(win32.PostMessageW(r.hwnd, FRAME_READY_MESSAGE, 0, 0)) {
-			sync.atomic_store_explicit(&r.redraw_pending, 0, .Relaxed)
-		}
-	}
+	// Posted frame messages outrank hardware input and can monopolize the UI
+	// thread under capture load. Invalidations coalesce and yield to input,
+	// including inside Windows' modal move/resize loop.
+	win32.InvalidateRect(r.hwnd, nil, false)
+}
+
+// Called only on the window thread. Retry without keeping WM_PAINT permanently
+// pending or requiring another capture (the last shared frame may be busy).
+renderer_retry_redraw :: proc(r: ^Renderer, delay_ms: u32 = win32.USER_TIMER_MINIMUM) {
+	if r.hwnd == nil || !r.ready || r.capture_suspended || r.redraw_retry_pending do return
+	r.redraw_retry_pending = win32.SetTimer(r.hwnd, REDRAW_RETRY_TIMER, delay_ms, nil) != 0
+}
+
+renderer_cancel_redraw_retry :: proc(r: ^Renderer) {
+	if !r.redraw_retry_pending do return
+	win32.KillTimer(r.hwnd, REDRAW_RETRY_TIMER)
+	r.redraw_retry_pending = false
 }
 
 renderer_request_ui_redraw :: proc(r: ^Renderer) {
@@ -117,6 +154,7 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 	r.height = max(height, 1)
 	r.capture_format = .NV12
 	r.format_auto = true
+	sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unavailable), .Relaxed)
 	sync.atomic_store_explicit(&r.capture_formats, u32(1)<<u32(Capture_Format.NV12), .Relaxed)
 
 	factory: ^dxgi.IFactory4
@@ -194,15 +232,39 @@ renderer_create_back_buffers :: proc(r: ^Renderer) -> bool {
 }
 
 renderer_draw :: proc(r: ^Renderer) {
-	if !r.ready || r.width == 0 || r.height == 0 do return
+	if !r.ready do return
+	if r.drawing {
+		renderer_retry_redraw(r)
+		return
+	}
+	r.drawing = true
+	defer {
+		r.drawing = false
+		if r.suspend_requested do renderer_suspend_capture(r)
+	}
+	if r.pending_width != 0 && r.pending_height != 0 {
+		width, height := r.pending_width, r.pending_height
+		r.pending_width, r.pending_height = 0, 0
+		renderer_resize(r, width, height)
+		if !r.suspend_requested && r.width == width && r.height == height do renderer_resume_capture(r)
+	}
+	if !r.ready || r.capture_suspended || r.width == 0 || r.height == 0 do return
 	frame_allocator := mem.arena_allocator(&app.frame_arena)
 	context.allocator = frame_allocator
 	context.temp_allocator = frame_allocator
 	defer mem.arena_free_all(&app.frame_arena)
 
 	if r.target == nil do return
+	video_top_inset := u32(0)
+	if app.ui.ready && app.controls_visible {
+		video_top_inset = u32(title_bar_height_for_dpi(win32.GetDpiForWindow(r.hwnd)))
+	}
+	if r.video_top_inset != video_top_inset {
+		r.video_top_inset = video_top_inset
+		video_pipeline_bind(r)
+	}
 	sequence := sync.atomic_load_explicit(&r.video_sequence, .Acquire)
-	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
+	capture_ready := r.reconnect_thread == nil && sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 	presented_sequence: u64
 
 	clear := [4]f32{0, 0, 0, 1}
@@ -211,11 +273,15 @@ renderer_draw :: proc(r: ^Renderer) {
 	if sequence != 0 && capture_ready {
 		// Keep the previous presentation on screen while capture owns the surface.
 		presented_sequence = video_pipeline_draw(r, r.target)
-		if presented_sequence == 0 do return
+		if presented_sequence == 0 {
+			renderer_retry_redraw(r)
+			return
+		}
 	}
 
 	// Skip all ImGui work while the fullscreen title bar is hidden.
-	overlay_visible := app.ui.ready && (app.controls_visible || app.ui.menu_open)
+	feedback_visible := screenshot_busy(&app.screenshot) || time.diff(time.now(), app.screenshot_feedback_until) > 0
+	overlay_visible := app.ui.ready && (app.controls_visible || app.ui.menu_open || feedback_visible)
 	if overlay_visible {
 		draw_data := imgui_ui_new_frame(&app.ui, r)
 		targets := [1]^d3d11.IRenderTargetView{r.target}
@@ -223,13 +289,13 @@ renderer_draw :: proc(r: ^Renderer) {
 		imgui_ui_render(&app.ui, draw_data)
 	}
 
-	present_flags := dxgi.PRESENT{.ALLOW_TEARING} if r.allow_tearing else dxgi.PRESENT{}
-	if failed(r.swap_chain.Present(r.swap_chain, 0, present_flags)) do return
+	if !renderer_present(r) do return
 	now := time.now()
 	if presented_sequence != 0 && presented_sequence != r.last_presented_seq {
 		r.last_presented_seq = presented_sequence
 		r.last_video_present = now
 		r.fps_window_frames += 1
+		capture_health_mark_present(r)
 	}
 	elapsed := time.duration_seconds(time.diff(r.fps_window_start, now))
 	if elapsed >= 0.5 {
@@ -237,6 +303,34 @@ renderer_draw :: proc(r: ^Renderer) {
 		r.fps_window_frames = 0
 		r.fps_window_start = now
 	}
+}
+
+renderer_present :: proc(r: ^Renderer) -> bool {
+	// A zero sync interval alone can still sleep behind a full display queue.
+	// Keep the window thread available for dragging when the compositor is busy.
+	present_flags := dxgi.PRESENT{.DO_NOT_WAIT}
+	if r.allow_tearing do present_flags += {.ALLOW_TEARING}
+	hr := r.swap_chain.Present(r.swap_chain, 0, present_flags)
+	if hr == dxgi.ERROR_WAS_STILL_DRAWING {
+		renderer_retry_redraw(r)
+		return false
+	}
+	if hr == dxgi.STATUS_OCCLUDED {
+		renderer_retry_redraw(r, 100)
+		return false
+	}
+	if hr != win32.HRESULT(win32.S_OK) do return false
+	renderer_cancel_redraw_retry(r)
+	return true
+}
+
+renderer_request_resize :: proc(r: ^Renderer, width, height: u32) {
+	if !r.ready || width == 0 || height == 0 do return
+	r.suspend_requested = false
+	// Size messages can arrive faster than GPU buffers can be recreated. Apply
+	// only the latest client size when the next paint gets its turn.
+	r.pending_width, r.pending_height = width, height
+	renderer_request_redraw(r)
 }
 
 renderer_resize :: proc(r: ^Renderer, width, height: u32) {
@@ -281,6 +375,13 @@ renderer_release_back_buffers :: proc(r: ^Renderer) {
 
 renderer_destroy :: proc(r: ^Renderer) {
 	if r == nil do return
+	renderer_cancel_redraw_retry(r)
+	// The reconnect worker owns capture_stop until it finishes.
+	if r.reconnect_thread != nil {
+		thread.join(r.reconnect_thread)
+		thread.destroy(r.reconnect_thread)
+		r.reconnect_thread = nil
+	}
 	capture_stop(r)
 	renderer_release_back_buffers(r)
 	com_release(r.rasterizer)
@@ -523,22 +624,31 @@ compile_shader :: proc(entry, target: cstring) -> ^d3dc.ID3DBlob {
 	return code
 }
 
-video_pipeline_bind :: proc(r: ^Renderer) {
-	samplers := [1]^d3d11.ISamplerState{r.sampler}
-	view_width, view_height := f32(r.width), f32(r.height)
-	r.letterboxed = u64(r.width)*9 != u64(r.height)*16
-	if u64(r.width)*9 > u64(r.height)*16 {
+// The title bar occupies its own client area. Fit the entire capture below
+// it, retaining the same 16:9 image when the bar appears in fullscreen.
+video_viewport :: proc(width, height, top_inset: u32) -> d3d11.VIEWPORT {
+	top := min(top_inset, height)
+	available_height := height-top
+	view_width, view_height := f32(width), f32(available_height)
+	if u64(width)*9 > u64(available_height)*16 {
 		view_width = view_height * 16.0 / 9.0
 	} else {
 		view_height = view_width * 9.0 / 16.0
 	}
-	viewport := d3d11.VIEWPORT{
-		TopLeftX = (f32(r.width)-view_width)*0.5,
-		TopLeftY = (f32(r.height)-view_height)*0.5,
+	return d3d11.VIEWPORT{
+		TopLeftX = (f32(width)-view_width)*0.5,
+		TopLeftY = f32(top)+(f32(available_height)-view_height)*0.5,
 		Width = view_width,
 		Height = view_height,
 		MaxDepth = 1,
 	}
+}
+
+video_pipeline_bind :: proc(r: ^Renderer) {
+	samplers := [1]^d3d11.ISamplerState{r.sampler}
+	viewport := video_viewport(r.width, r.height, r.video_top_inset)
+	// Clear every region outside the video, including the reserved title bar.
+	r.letterboxed = r.video_top_inset != 0 || u64(r.width)*9 != u64(r.height)*16
 	r.context_11.RSSetState(r.context_11, r.rasterizer)
 	r.context_11.RSSetViewports(r.context_11, 1, &viewport)
 	r.context_11.IASetInputLayout(r.context_11, nil)
@@ -571,6 +681,7 @@ video_pipeline_draw :: proc(r: ^Renderer, target: ^d3d11.IRenderTargetView) -> u
 }
 
 renderer_set_capture_format :: proc(r: ^Renderer, format: Capture_Format) {
+	if renderer_edid_busy(r) do return
 	if !capture_format_available(r, format) do return
 	if format == r.capture_format {
 		r.format_auto = false
@@ -584,7 +695,19 @@ renderer_set_capture_format :: proc(r: ^Renderer, format: Capture_Format) {
 }
 
 renderer_suspend_capture :: proc(r: ^Renderer) {
-	if !r.ready || r.capture_suspended do return
+	if !r.ready do return
+	renderer_cancel_redraw_retry(r)
+	r.pending_width, r.pending_height = 0, 0
+	// DXGI can dispatch size messages from inside Present. Finish the current
+	// draw before releasing any textures or swap-chain buffers it still uses.
+	if r.drawing || r.reconnect_thread != nil ||
+	   sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) != 0 ||
+	   sync.atomic_load_explicit(&r.edid_request_kind, .Acquire) != u32(EDID_Request_Kind.None) {
+		r.suspend_requested = true
+		return
+	}
+	r.suspend_requested = false
+	if r.capture_suspended do return
 	r.suspended_resource_width = r.resource_width
 	r.suspended_resource_height = r.resource_height
 	capture_stop(r)
@@ -606,11 +729,11 @@ renderer_suspend_capture :: proc(r: ^Renderer) {
 }
 
 renderer_resume_capture :: proc(r: ^Renderer) {
-	if !r.ready || !r.capture_suspended do return
+	if !r.ready || !r.capture_suspended || r.reconnect_thread != nil do return
 	width := r.suspended_resource_width
 	height := r.suspended_resource_height
 	if width == 0 || height == 0 {
-		best, found := capture_pick_best_mode_for_format(r, r.capture_format)
+		best, found := capture_pick_best_mode_for_format(r, r.capture_format, r.requested_width == 0)
 		if found {
 			width, height = best.width, best.height
 		} else {
@@ -631,6 +754,7 @@ renderer_resume_capture :: proc(r: ^Renderer) {
 }
 
 renderer_set_capture_format_auto :: proc(r: ^Renderer) {
+	if renderer_edid_busy(r) do return
 	format, found := capture_pick_auto_format(r, r.requested_width, r.requested_height)
 	if !found || format == r.capture_format {
 		r.format_auto = true
@@ -640,6 +764,7 @@ renderer_set_capture_format_auto :: proc(r: ^Renderer) {
 }
 
 renderer_set_capture_resolution :: proc(r: ^Renderer, width, height: u32) {
+	if renderer_edid_busy(r) do return
 	requested_width, requested_height := width, height
 	if requested_width == 0 || requested_height == 0 {
 		requested_width, requested_height = 0, 0
@@ -663,6 +788,11 @@ renderer_apply_capture_configuration :: proc(
 	target_override_width := u32(0),
 	target_override_height := u32(0),
 ) {
+	if !r.ready || r.capture_suspended || r.reconnect_thread != nil ||
+	   sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) != 0 ||
+	   sync.atomic_load_explicit(&r.edid_request_kind, .Acquire) != u32(EDID_Request_Kind.None) {
+		return
+	}
 	previous_format := r.capture_format
 	previous_format_auto := r.format_auto
 	previous_requested_width := r.requested_width
@@ -683,7 +813,7 @@ renderer_apply_capture_configuration :: proc(
 	if target_override_width != 0 && target_override_height != 0 {
 		target_width, target_height = target_override_width, target_override_height
 	} else if target_width == 0 || target_height == 0 {
-		best, found := capture_pick_best_mode_for_format(r, format)
+		best, found := capture_pick_best_mode_for_format(r, format, true)
 		if found {
 			target_width, target_height = best.width, best.height
 		} else {
@@ -727,7 +857,7 @@ renderer_apply_capture_configuration :: proc(
 }
 
 renderer_handle_capture_failure :: proc(r: ^Renderer, generation: u32) {
-	if !r.ready || r.capture_suspended do return
+	if !r.ready || r.capture_suspended || r.reconnect_thread != nil do return
 	if generation != sync.atomic_load_explicit(&r.capture_generation, .Acquire) do return
 	if sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 do return
 	if !r.last_working_valid {
@@ -754,13 +884,13 @@ renderer_handle_capture_failure :: proc(r: ^Renderer, generation: u32) {
 // Startup uses a provisional NV12/4K allocation before the device's modes are
 // known. Resolve Auto after enumeration, including devices without that mode.
 renderer_reconcile_auto_capture :: proc(r: ^Renderer) {
-	if !r.ready || !r.format_auto || r.capture_suspended || r.startup_auto_resolved do return
+	if !r.ready || !r.format_auto || r.capture_suspended || r.startup_auto_resolved || r.reconnect_thread != nil do return
 	format, found := capture_pick_auto_format(r, r.requested_width, r.requested_height)
 	if !found do return
 	r.startup_auto_resolved = true
 	width, height := r.requested_width, r.requested_height
 	if width == 0 {
-		best, best_found := capture_pick_best_mode_for_format(r, format)
+		best, best_found := capture_pick_best_mode_for_format(r, format, true)
 		if !best_found do return
 		width, height = best.width, best.height
 	}

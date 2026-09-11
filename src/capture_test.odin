@@ -75,6 +75,10 @@ capture_upload_bounds_test :: proc(t: ^testing.T) {
 		{.YUY2, 1920, 1080, 0, 4147200, 3840, true},
 		{.RGB24, 1920, 1080, -7680, 8294400, 7680, true},
 		{.I420, 1920, 1080, 2048, 3317760, 2048, true},
+		{.RGB24, 4, 4, 32, 112, 32, true},
+		{.RGB24, 4, 4, 32, 111, 0, false},
+		{.NV12, 4, 4, 16, 84, 16, true},
+		{.NV12, 4, 4, 16, 83, 0, false},
 		{.MJPEG, 1920, 1080, 0, 3110399, 0, false},
 		{.NV12, 1920, 1080, -1920, 3110400, 0, false},
 		{.NV12, 1920, 1081, 0, 4000000, 0, false},
@@ -89,6 +93,87 @@ capture_upload_bounds_test :: proc(t: ^testing.T) {
 		pitch, valid := capture_upload_pitch(c.format, c.width, c.height, c.stride, c.length)
 		testing.expect_value(t, valid, c.valid)
 		testing.expect_value(t, pitch, c.pitch)
+	}
+}
+
+@(test)
+capture_upload_2d_bounds_test :: proc(t: ^testing.T) {
+	pixels: [192]u8
+	start := &pixels[0]
+	Case :: struct {
+		format: Capture_Format,
+		width, height: u32,
+		stride: i32,
+		scanline_offset: int,
+		length: u32,
+		valid: bool,
+		data_offset: int,
+		pitch: u32,
+	}
+	cases := []Case{
+		{.RGB24, 4, 4, 32, 8, 136, true, 8, 32},
+		{.RGB24, 4, 4, -32, 104, 136, true, 8, 32},
+		{.NV12, 4, 4, 16, 8, 104, true, 8, 16},
+		{.RGB24, 4, 4, 32, 8, 120, true, 8, 32},
+		{.RGB24, 4, 4, 32, 8, 119, false, 0, 0},
+		{.RGB24, 4, 4, -32, 95, 128, false, 0, 0},
+		{.RGB24, 4, 4, 32, 129, 128, false, 0, 0},
+		{.RGB24, 4, 4, 0, 0, 128, false, 0, 0},
+		{.NV12, 4, 4, -16, 48, 96, false, 0, 0},
+		{.RGB24, 4, 0xffffffff, -2147483648, 0, 128, false, 0, 0},
+	}
+	for c in cases {
+		data, pitch, valid := capture_upload_2d_data(c.format, c.width, c.height, c.stride, &pixels[c.scanline_offset], start, c.length)
+		testing.expect_value(t, valid, c.valid)
+		testing.expect_value(t, pitch, c.pitch)
+		if c.valid {
+			testing.expect(t, data == &pixels[c.data_offset])
+		} else {
+			testing.expect(t, data == nil)
+		}
+	}
+	_, _, valid := capture_upload_2d_data(.RGB24, 4, 4, 32, &pixels[0], &pixels[1], 128)
+	testing.expect(t, !valid)
+	_, _, valid = capture_upload_2d_data(.RGB24, 4, 4, 32, nil, start, 128)
+	testing.expect(t, !valid)
+}
+
+@(test)
+capture_rejected_buffer_cleanup_test :: proc(t: ^testing.T) {
+	if !testing.expect(t, !failed(win32.CoInitializeEx(nil, .MULTITHREADED))) do return
+	defer win32.CoUninitialize()
+	if !testing.expect(t, !failed(MFStartup(MF_VERSION, MFSTARTUP_FULL))) do return
+	defer MFShutdown()
+	// Real software buffers exercise COM ownership without a capture card or GPU.
+	// Each undersized frame must release its temporary references and 2D lock.
+	r := Renderer{capture_format = .NV12, capture_width = 64, capture_height = 36}
+	for iteration in 0..<32 {
+		buffer: ^IMFMediaBuffer
+		sample: ^IMFSample
+		defer {
+			if sample != nil {
+				unknown := cast(^win32.IUnknown)sample
+				testing.expect_value(t, unknown.Release(unknown), win32.ULONG(0))
+			}
+			if buffer != nil {
+				unknown := cast(^win32.IUnknown)buffer
+				testing.expect_value(t, unknown.Release(unknown), win32.ULONG(0))
+			}
+		}
+		if iteration%2 == 0 {
+			if !testing.expect(t, !failed(MFCreateMemoryBuffer(32*18*3/2, &buffer))) do return
+			if !testing.expect(t, !failed(buffer.SetCurrentLength(buffer, 32*18*3/2))) do return
+		} else {
+			if !testing.expect(t, !failed(MFCreate2DMediaBuffer(32, 18, MFVideoFormat_NV12.Data1, false, &buffer))) do return
+		}
+		if !testing.expect(t, !failed(MFCreateSample(&sample))) do return
+		if !testing.expect(t, !failed(sample.AddBuffer(sample, buffer))) do return
+		testing.expect(t, !capture_upload_sample(&r, sample))
+		// A surviving Lock2DSize prevents switching to the contiguous Lock API.
+		data: ^u8
+		if testing.expect(t, !failed(buffer.Lock(buffer, &data, nil, nil))) {
+			buffer.Unlock(buffer)
+		}
 	}
 }
 
@@ -149,6 +234,19 @@ capture_mode_selection_test :: proc(t: ^testing.T) {
 	// Equal modes preserve native driver order; comparison uses exact fractions.
 	testing.expect(t, !mode_better(r.source_modes[4], r.source_modes[2]))
 	testing.expect(t, mode_better(r.source_modes[2], r.source_modes[1]))
+	// High-rate 4K capture modes can duplicate a 60 Hz HDMI signal. Automatic
+	// selection prefers a native 60 Hz mode. Lower resolutions retain the
+	// highest-rate policy.
+	uhd_144 := Capture_Mode{width = 3840, height = 2160, fps_num = 144, fps_den = 1}
+	uhd_120 := Capture_Mode{width = 3840, height = 2160, fps_num = 120, fps_den = 1}
+	uhd_60 := Capture_Mode{width = 3840, height = 2160, fps_num = 60, fps_den = 1}
+	testing.expect(t, mode_better(uhd_60, uhd_144, true))
+	testing.expect(t, mode_better(uhd_120, uhd_144, true))
+	testing.expect(t, !mode_better(uhd_144, uhd_60, true))
+	testing.expect(t, mode_better(uhd_144, uhd_60))
+	hd_60 := Capture_Mode{width = 1920, height = 1080, fps_num = 60, fps_den = 1}
+	hd_120 := Capture_Mode{width = 1920, height = 1080, fps_num = 120, fps_den = 1}
+	testing.expect(t, mode_better(hd_120, hd_60))
 }
 
 @(test)
