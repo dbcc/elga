@@ -27,6 +27,7 @@ Capture_Config :: struct {
 }
 
 Renderer :: struct {
+	enhancements: Video_Enhancements,
 	ready:          bool,
 	hwnd:           win32.HWND,
 	width:          u32,
@@ -85,6 +86,7 @@ Renderer :: struct {
 	letterboxed:    bool,
 	video_top_inset: u32,
 	video_sequence: u64,
+	video_timestamp, video_arrival: i64,
 	video_vertical_flip: u32,
 	capture_running: bool,
 	capture_ready:   u32,
@@ -169,7 +171,14 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 
 	feature_levels := [1]d3d11.FEATURE_LEVEL{._11_0}
 	if !check(d3d11.CreateDevice(nil, .HARDWARE, nil, {.BGRA_SUPPORT}, &feature_levels[0], 1, d3d11.SDK_VERSION, &r.device_11, nil, &r.context_11), "Render D3D11CreateDevice") do return false
-	if !check(d3d11.CreateDevice(nil, .HARDWARE, nil, {.BGRA_SUPPORT, .VIDEO_SUPPORT}, &feature_levels[0], 1, d3d11.SDK_VERSION, &r.capture_device_11, nil, &r.capture_context_11), "Capture D3D11CreateDevice") do return false
+	// Shared capture and enhancement textures must stay on the render adapter.
+	dxgi_device: ^dxgi.IDevice
+	if !check(r.device_11.QueryInterface(r.device_11, dxgi.IDevice_UUID, cast(^rawptr)&dxgi_device), "Render IDXGIDevice") do return false
+	defer com_release(dxgi_device)
+	adapter: ^dxgi.IAdapter
+	if !check(dxgi_device.GetAdapter(dxgi_device, &adapter), "Render adapter") do return false
+	defer com_release(adapter)
+	if !check(d3d11.CreateDevice(adapter, .UNKNOWN, nil, {.BGRA_SUPPORT, .VIDEO_SUPPORT}, &feature_levels[0], 1, d3d11.SDK_VERSION, &r.capture_device_11, nil, &r.capture_context_11), "Capture D3D11CreateDevice") do return false
 	// Media Foundation and the capture callback share the capture context.
 	multithread: ^ID3D10Multithread
 	if !check(r.capture_device_11.QueryInterface(r.capture_device_11, ID3D10Multithread_UUID, cast(^rawptr)&multithread), "Capture multithread protection") do return false
@@ -283,11 +292,13 @@ renderer_draw :: proc(r: ^Renderer) {
 
 	if !renderer_present(r) do return
 	now := time.now()
-	if presented_sequence != 0 && presented_sequence != r.last_presented_seq {
+	enhanced_new := r.enhancements.cached.token != 0 && r.enhancements.cached.token != r.enhancements.presented_token
+	if presented_sequence != 0 && (presented_sequence != r.last_presented_seq || enhanced_new) {
 		r.last_presented_seq = presented_sequence
 		r.last_video_present = now
 		r.fps_window_frames += 1
 		capture_health_mark_present(r)
+		video_enhancements_presented(r)
 	}
 	elapsed := time.duration_seconds(time.diff(r.fps_window_start, now))
 	if elapsed >= 0.5 {
@@ -358,6 +369,7 @@ renderer_release_back_buffers :: proc(r: ^Renderer) {
 
 renderer_destroy :: proc(r: ^Renderer) {
 	if r == nil do return
+	video_enhancements_destroy(r)
 	renderer_cancel_redraw_retry(r)
 	// The reconnect worker owns capture_stop until it finishes.
 	if r.reconnect_thread != nil {
@@ -456,6 +468,7 @@ video_resources_create :: proc(r: ^Renderer, format: Capture_Format, width, heig
 }
 
 video_resources_release :: proc(r: ^Renderer) {
+	video_enhancements_reset(r)
 	if r.context_11 != nil {
 		null_views := [1]^d3d11.IShaderResourceView{nil}
 		r.context_11.PSSetShaderResources(r.context_11, 0, len(null_views), &null_views[0])
@@ -603,14 +616,28 @@ video_mutex_acquire :: proc(mutex: ^dxgi.IKeyedMutex, key: u64) -> bool {
 }
 
 video_pipeline_draw :: proc(r: ^Renderer, target: ^d3d11.IRenderTargetView) -> u64 {
+	video_enhancements_prepare(r)
 	// Key 1 consumes a new frame. Key 0 allows repainting the last frame during
 	// resize or a stalled source without allocating another capture-sized texture.
-	if !video_mutex_acquire(r.render_mutex, 1) && !video_mutex_acquire(r.render_mutex, 0) do return 0
-	defer r.render_mutex.ReleaseSync(r.render_mutex, 0)
+	owned := video_mutex_acquire(r.render_mutex, 1) || video_mutex_acquire(r.render_mutex, 0)
+	if !owned && r.enhancements.cached_view == nil do return 0
+	defer { if owned do r.render_mutex.ReleaseSync(r.render_mutex, 0) }
 	sequence := sync.atomic_load_explicit(&r.video_sequence, .Acquire)
+	if owned do video_enhancements_submit(r, sequence)
+	if owned && r.enhancements.cached_view != nil {
+		// The worker copy is already submitted. Enhanced drawing uses its own
+		// texture, so return capture ownership before rendering video and UI.
+		r.render_mutex.ReleaseSync(r.render_mutex, 0)
+		owned = false
+	}
 	targets := [1]^d3d11.IRenderTargetView{target}
 	views := [1]^d3d11.IShaderResourceView{r.rgb_view}
 	pixel_shader := r.flipped_pixel_shader if sync.atomic_load_explicit(&r.video_vertical_flip, .Acquire) != 0 else r.native_pixel_shader
+	if r.enhancements.cached_view != nil {
+		views[0] = r.enhancements.cached_view
+		pixel_shader = r.native_pixel_shader
+		sequence = r.enhancements.cached.sequence
+	}
 	r.context_11.OMSetRenderTargets(r.context_11, 1, &targets[0], nil)
 	r.context_11.PSSetShader(r.context_11, pixel_shader, nil, 0)
 	r.context_11.PSSetShaderResources(r.context_11, 0, len(views), &views[0])

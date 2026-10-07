@@ -23,6 +23,7 @@ Audio_Output :: struct {
 // The 4K X's capture endpoint is monitored through a duplex WASAPI stream.
 // muted and volume_percent are read by the audio callback thread.
 Audio_State :: struct {
+	video_delay: Audio_Video_Delay,
 	ctx: ma.context_type,
 	device: ma.device,
 	context_ready: bool,
@@ -234,6 +235,9 @@ audio_close_device :: proc(a: ^Audio_State) {
 	ma.device_stop(&a.device)
 	ma.device_uninit(&a.device)
 	a.device_ready = false
+	// device_stop has joined the callback; discard audio from the old device.
+	a.video_delay.cursor, a.video_delay.filled = 0, 0
+	a.video_delay.fade = AUDIO_VIDEO_FADE_FRAMES
 }
 
 audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {
@@ -246,6 +250,7 @@ audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_cou
 	}
 	output_samples := (cast([^]f32)output)[:sample_count]
 	input_samples := (cast([^]f32)input)[:sample_count]
+	if audio_video_delay_samples(&a.video_delay, output_samples, input_samples) do input_samples = output_samples
 	audio_apply_volume_samples(output_samples, input_samples, audio_get_volume_percent(a), audio_is_muted(a))
 }
 
@@ -258,7 +263,7 @@ audio_apply_volume_samples :: proc "contextless" (output, input: []f32, volume_p
 		return
 	}
 	if volume_percent >= 100 {
-		mem.copy_non_overlapping(raw_data(output[:sample_count]), raw_data(input[:sample_count]), sample_count*size_of(f32))
+		if raw_data(output) != raw_data(input) do mem.copy_non_overlapping(raw_data(output[:sample_count]), raw_data(input[:sample_count]), sample_count*size_of(f32))
 		return
 	}
 	gain := f32(volume_percent)/100.0

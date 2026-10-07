@@ -26,13 +26,17 @@ and it builds as one standalone executable.
   position pinning, and 16:9 resizing.
 - DPI-aware scalable text and crisp vector icon controls.
 - Optional presented-frame FPS counter.
+- Independent, remembered RTX Video Super Resolution and 2x frame-generation
+  preferences, with an optional NVIDIA backend (real GPU tests pass on RTX 5090;
+  see [video enhancements](docs/VIDEO_ENHANCEMENTS.md)).
 - Remembered window layout and monitor, with safe restoration after a display
   is disconnected; always-on-top is restored too.
 - Native-resolution PNG screenshots, manual capture reconnect, and detailed
   capture health in Settings.
 - Hardware-authoritative Input EDID mode control for Merged, Display, and the
   EDID already stored internally on the card.
-- No runtime installer or separately distributed DLLs.
+- The base viewer requires no runtime installer or separately distributed DLLs;
+  video enhancements use a separately installed add-on.
 
 ## Requirements
 

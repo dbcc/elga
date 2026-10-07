@@ -120,7 +120,7 @@ source_reader_on_read_sample :: proc "system" (this: ^IMFSourceReaderCallback, s
 		}
 	} else if sample != nil {
 		capture_health_note_sample(&r.health)
-		capture_copy_sample(r, sample)
+		capture_copy_sample(r, sample, timestamp)
 	}
 	if capture_should_read(r) do capture_read_next(r, callback.reader)
 	return win32.HRESULT(win32.S_OK)
@@ -607,7 +607,7 @@ mode_better :: proc(a, b: Capture_Mode, prefer_uhd_60 := false) -> bool {
 	return u64(a.fps_num)*u64(b.fps_den) > u64(b.fps_num)*u64(a.fps_den)
 }
 
-capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
+capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample, timestamp := i64(0)) {
 	// Drop a busy frame before querying COM buffers or merging software samples.
 	if !video_mutex_acquire(r.capture_mutex, 0) {
 		sync.atomic_add_explicit(&r.health.busy_drops, 1, .Relaxed)
@@ -616,6 +616,8 @@ capture_copy_sample :: proc(r: ^Renderer, sample: ^IMFSample) {
 	ok := capture_upload_sample(r, sample) && capture_process_uploaded_frame(r)
 	if ok {
 		// Publish metadata while the matching texture is exclusively owned.
+		r.video_timestamp = timestamp
+		r.video_arrival = video_now()
 		sync.atomic_add_explicit(&r.video_sequence, 1, .Release)
 	} else {
 		sync.atomic_add_explicit(&r.health.upload_errors, 1, .Relaxed)

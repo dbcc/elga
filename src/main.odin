@@ -42,6 +42,9 @@ UI_Action :: enum u32 {
 	Reconnect,
 	EDID_Mode,
 	EDID_Refresh,
+	Video_Super_Resolution,
+	Video_Frame_Generation,
+	Video_Game_30_FPS,
 }
 
 App :: struct {
@@ -124,6 +127,7 @@ main :: proc() {
 	if !renderer_init(&app.renderer, hwnd, u32(client.right), u32(client.bottom)) do fatal("D3D11 initialization failed")
 	if !imgui_ui_init(&app.ui, &app.renderer) do fatal("Dear ImGui DX11 initialization failed")
 	audio_init(&app.audio)
+	video_enhancements_init(&app.renderer.enhancements)
 	wake_init(&app.wake)
 	win32.SetTimer(hwnd, UI_TIMER, 100, nil)
 
@@ -131,7 +135,24 @@ main :: proc() {
 	win32.UpdateWindow(hwnd)
 
 	msg: win32.MSG
-	for win32.GetMessageW(&msg, nil, 0, 0) > 0 {
+	for {
+		// Generated frames have deadlines between capture arrivals. Drain queued
+		// input first, then wait for either messages or the presentation timer.
+		if app.renderer.enhancements.timer != nil && app.renderer.enhancements.preferences.frame_generation {
+			if !win32.PeekMessageW(&msg, nil, 0, 0, win32.PM_REMOVE) {
+				handles := [1]win32.HANDLE{app.renderer.enhancements.timer}
+				result := win32.MsgWaitForMultipleObjects(1, &handles[0], false, win32.INFINITE, win32.QS_ALLINPUT)
+				if result == win32.WAIT_OBJECT_0 do renderer_request_redraw(&app.renderer)
+				continue
+			}
+			if msg.message == win32.WM_QUIT do break
+			win32.TranslateMessage(&msg)
+			win32.DispatchMessageW(&msg)
+			continue
+		}
+		if win32.GetMessageW(&msg, nil, 0, 0) <= 0 {
+			break
+		}
 		win32.TranslateMessage(&msg)
 		win32.DispatchMessageW(&msg)
 	}
@@ -172,6 +193,9 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		return 0
 	case UI_ACTION_MESSAGE:
 		apply_ui_action(UI_Action(wparam), int(lparam))
+		return 0
+	case VIDEO_ENHANCEMENT_MESSAGE:
+		renderer_request_redraw(&app.renderer)
 		return 0
 	case CAPTURE_FAILED_MESSAGE:
 		renderer_edid_capture_failed(&app.renderer, u32(wparam))
@@ -337,6 +361,7 @@ ui_tick :: proc() {
 	changed := wake_update(&app.wake)
 	changed |= renderer_update_reconnect(&app.renderer)
 	capture_health_update(&app.renderer)
+	video_enhancements_health_tick(&app.renderer)
 	if !app.renderer.drawing && screenshot_update(&app.screenshot, &app.renderer) {
 		app.screenshot_feedback_until = time.time_add(now, SCREENSHOT_FEEDBACK_DURATION)
 		changed = true
@@ -404,6 +429,12 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 		if value >= 0 && value < len(EDID_Mode) do renderer_request_edid_mode(&app.renderer, EDID_Mode(value))
 	case .EDID_Refresh:
 		renderer_request_edid_refresh(&app.renderer)
+	case .Video_Super_Resolution:
+		video_enhancements_toggle(&app.renderer, .Super_Resolution)
+	case .Video_Frame_Generation:
+		video_enhancements_toggle(&app.renderer, .Frame_Generation)
+	case .Video_Game_30_FPS:
+		video_enhancements_toggle(&app.renderer, .Game_30_FPS)
 	case .Minimize:
 		win32.ShowWindow(app.hwnd, win32.SW_MINIMIZE)
 	case .Maximize:

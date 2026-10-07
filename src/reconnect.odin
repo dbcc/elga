@@ -9,6 +9,7 @@ import "core:time"
 renderer_request_reconnect :: proc(r: ^Renderer, count_recovery := true) -> bool {
 	if r == nil || !r.ready || r.capture_suspended || r.drawing || r.reconnect_thread != nil || renderer_edid_in_flight(r) do return false
 	r.reconnect_error = false
+	video_enhancements_reset(r)
 	sync.atomic_store_explicit(&r.reconnect_done, 0, .Release)
 	r.reconnect_thread = thread.create(renderer_reconnect_thread_proc, .Normal, "capture-reconnect")
 	if r.reconnect_thread == nil {

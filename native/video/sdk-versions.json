@@ -1,0 +1,14 @@
+{
+  "rtx_video_sdk": {
+    "version": "1.1.0",
+    "download": "https://developer.nvidia.com/downloads/rtx/sdk/rtx_video_sdk_v1.1.0.zip",
+    "header": "include/nvsdk_ngx_defs_vsr.h",
+    "runtime": "bin/Windows/x64/rel/nvngx_vsr.dll"
+  },
+  "optical_flow_sdk": {
+    "version": "5.0.7",
+    "download": "https://developer.nvidia.com/downloads/designworks/optical-flow-sdk/secure/5.0/optical_flow_sdk_5.0.7.zip/",
+    "header": "NvOFFRUC.h",
+    "runtime": "NvOFFRUC.dll"
+  }
+}

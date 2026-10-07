@@ -5,7 +5,36 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ## Unreleased
 
+### Fixed
+
+- Preserve manual 30 FPS playback timing and audio delay across short capture
+  gaps; replacement HDMI repeats retain their game-frame presentation slot.
+- Prevent stale enhancement status and queued frames after reconfiguration or
+  timestamp resets; flush audio history even when its delay length is unchanged.
+- Preserve frame-generation audio delay when only super resolution pauses, and
+  keep failed effects paused through resize until explicitly retried.
+- Present completed enhancement frames without starving playback behind a newer
+  GPU job; release capture ownership before drawing enhanced video.
+
+### Changed
+
+- Skip the unused HDMI repeat's color conversion when the 30 FPS override is active.
+- Reduce duplicate-comparison atomic contention and omit unused history textures.
+  SR-only processing uses three output textures instead of eight.
+- Keep frame-generation sessions through window-size changes, skip unnecessary
+  VSR initialization, and remove the presentation timer when frame generation is off.
+
 ### Added
+
+- Remembered "Game frame rate: 30 FPS" override for frame generation of 30 FPS
+  console games carried in 60 FPS capture streams, including nonidentical repeats.
+- Optional, independent RTX Video Super Resolution and frame-generation settings
+  saved in `elga-video.ini`. The base viewer remains SDK-free and falls back when
+  the NVIDIA add-on is absent or unsupported.
+- Optional C++ D3D11 processing worker, bounded shared-texture queues, exact
+  repeated-frame cadence detection, timed presentation, and matching audio delay.
+  Synthetic transport and real NVIDIA inference tests pass on RTX 5090; live
+  capture quality and audio/video timing acceptance remain pending.
 
 - Settings > Input EDID mode reads and changes Merged, Display, or Internal
   directly through the selected 4K X Media Foundation/KS source. Writes require

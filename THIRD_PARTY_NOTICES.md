@@ -2,6 +2,15 @@
 
 Elga Camera uses the following third-party software.
 
+## Optional NVIDIA video enhancements
+
+The base executable does not bundle NVIDIA SDKs or NVIDIA runtime DLLs. The
+optional backend targets NVIDIA RTX Video SDK 1.1.0 and Optical Flow SDK 5.0.7.
+Obtain those SDKs from NVIDIA under their accompanying terms. An add-on package
+must include applicable NVIDIA licenses/notices and permitted dependencies.
+Packaging copies SDK notices and records SHA-256 hashes; it does not download
+SDKs or grant redistribution rights. See `docs/VIDEO_ENHANCEMENTS.md` for status.
+
 ## odin-imgui and Dear ImGui
 
 The repository vendors generated Odin bindings and a Windows static library

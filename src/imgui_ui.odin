@@ -284,6 +284,19 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui_build_capture_health(r)
 		imgui.EndMenu()
 	}
+	if imgui.BeginMenu("Video enhancements") {
+		e := &r.enhancements
+		if imgui.MenuItem("RTX Video Super Resolution", nil, e.preferences.super_resolution) do post_ui_action(.Video_Super_Resolution)
+		ui_item_tooltip(ui, "Upscale captured video on a supported NVIDIA GPU. Requires the optional enhancement add-on.")
+		imgui.TextDisabledUnformatted(video_enhancement_text(e.status.vsr_state, e.status.vsr_reason))
+		if imgui.MenuItem("Frame generation (2x)", nil, e.preferences.frame_generation) do post_ui_action(.Video_Frame_Generation)
+		ui_item_tooltip(ui, "Interpolate frames for smoother motion. Adds about 33 ms at 60 FPS or 67 ms at 30 FPS, with matching audio delay. Requires a sufficiently fast display.")
+		imgui.TextDisabledUnformatted(video_enhancement_text(e.status.fruc_state, e.status.fruc_reason))
+		if imgui.MenuItem("Game frame rate: 30 FPS", nil, e.preferences.game_30_fps) do post_ui_action(.Video_Game_30_FPS)
+		ui_item_tooltip(ui, "Use for 30 FPS games carried in a 60 FPS capture signal, including Switch 2. Frame generation samples at 30 FPS and targets 60 FPS even if repeated frames differ slightly. Off uses automatic detection. Only affects frame generation.")
+		if e.save_failed do imgui.TextDisabledUnformatted("Video preferences could not be saved")
+		imgui.EndMenu()
+	}
 	edid_open := imgui.BeginMenu("Input EDID mode")
 	ui_item_tooltip(ui, "Change how your capture device and display share video settings. The connected 4K X is the source of truth.")
 	if edid_open {
@@ -409,6 +422,15 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 	imgui.Separator()
 	imgui.TextUnformatted(fmt.ctprintf("Capture: %.1f FPS", h.capture_fps))
 	imgui.TextUnformatted(fmt.ctprintf("Displayed: %.1f FPS", h.present_fps))
+	e := &r.enhancements
+	if e.preferences.super_resolution || e.preferences.frame_generation {
+		if e.status.fruc_state == .Active do imgui.TextUnformatted(fmt.ctprintf("Source cadence: %.2f FPS (%s)", e.status.source_hz, "30 FPS override" if e.preferences.game_30_fps else "automatic"))
+		imgui.TextUnformatted(fmt.ctprintf("Enhanced output: %.1f original / %.1f generated FPS", e.original_fps, e.generated_fps))
+		imgui.TextUnformatted(fmt.ctprintf("Processing: %.2f ms / added delay: %.1f ms", e.status.processing_ms, f64(e.status.delay)/10_000))
+		imgui.TextUnformatted(fmt.ctprintf("Enhancement misses: %d", e.status.missed))
+		imgui.TextDisabledUnformatted(fmt.ctprintf("Super resolution: %s", video_enhancement_text(e.status.vsr_state, e.status.vsr_reason)))
+		imgui.TextDisabledUnformatted(fmt.ctprintf("Frame generation: %s", video_enhancement_text(e.status.fruc_state, e.status.fruc_reason)))
+	}
 	if !h.has_samples {
 		imgui.TextDisabledUnformatted("No frames received yet")
 	} else {
