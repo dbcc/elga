@@ -1,258 +1,301 @@
 # Elga Camera
 
-Elga Camera is an unofficial, native Windows viewer for the Elgato 4K X. Its
-native-format path keeps video on the GPU from capture through presentation,
-and it builds as one standalone executable.
+Elga Camera is an unofficial, native Windows viewer for the Elgato 4K X capture
+card. On its native-format path, video stays on the GPU from capture to
+presentation. The base viewer builds as a single standalone executable, with no
+installer and no separate DLLs. Optional NVIDIA video enhancements come as a
+separate add-on.
 
-> **Project status:** pre-release. The current revision is hardware-tested on
-> Windows with an Elgato 4K X, but packaged releases and a project license have
-> not yet been published.
+> **Project status:** pre-release. The current revision has been tested on
+> Windows with an Elgato 4K X, but no packaged release or project license has
+> been published yet.
 
 ## Features
 
-- Up to 3840x2160 at 144 FPS when exposed by the capture card and host system.
-- Automatic or manual NV12, P010, YUY2, I420, RGB24, and MJPEG source modes.
-- GPU-native presentation for NV12/P010/YUY2, with Windows Media Foundation
-  conversion to NV12 or 32-bit RGB for compatibility formats.
-- Selectable native 16:9 resolutions; 4K automatic selection prefers 60 FPS
-  so a 60 Hz HDMI source is not expanded into duplicate 120/144 FPS samples.
-- Driver-native color conversion using the 4K X's native YUV sample encoding,
-  with no app-level color adjustment or capture-card range changes.
-- Low-latency HDMI audio monitoring with software volume, mute, and selectable
-  Windows output devices.
-- One-click Nintendo Switch 2 wake control through a networked ESPHome wake
-  beacon available as `switch2-waker.local`.
-- Custom client-rendered title bar, borderless fullscreen, always-on-top,
-  position pinning, and 16:9 resizing.
-- DPI-aware scalable text and crisp vector icon controls.
-- Optional presented-frame FPS counter.
-- Independent, remembered RTX Video Super Resolution and 2x frame-generation
-  preferences, with an optional NVIDIA backend (real GPU tests pass on RTX 5090;
-  see [video enhancements](docs/VIDEO_ENHANCEMENTS.md)).
-- Remembered window layout and monitor, with safe restoration after a display
-  is disconnected; always-on-top is restored too.
-- Native-resolution PNG screenshots, manual capture reconnect, and detailed
-  capture health in Settings.
-- Hardware-authoritative Input EDID mode control for Merged, Display, and the
-  EDID already stored internally on the card.
-- The base viewer requires no runtime installer or separately distributed DLLs;
-  video enhancements use a separately installed add-on.
+- **Up to 3840x2160 at 144 FPS**, when the card and host system expose it.
+- **Six source formats:** NV12, P010, and YUY2 go straight to the GPU. I420
+  and MJPEG are converted to NV12, and RGB24 is expanded to 32-bit RGB, by
+  Windows Media Foundation.
+- **Faithful color:** the card's native YUV encoding is described directly to
+  the D3D11 video processor. The app adds no color, range, gamma, contrast, or
+  saturation adjustments, and it never changes the card's color-range setting.
+- **Sensible automatic mode selection:** at 4K, Auto prefers the highest rate
+  up to 60 FPS, so a 60 Hz HDMI source isn't padded out with duplicate
+  120/144 FPS frames.
+- **Low-latency HDMI audio monitoring** with software volume, mute, and a
+  choice of Windows output device.
+- **Input EDID mode control** (Merged, Display, Internal), checked by reading
+  the mode back from the card.
+- **Optional NVIDIA video enhancements:** RTX Video Super Resolution and 2x
+  frame generation, each toggled on its own, with matching audio delay. These
+  need a separately built add-on. See
+  [video enhancements](docs/VIDEO_ENHANCEMENTS.md).
+- **Native-resolution PNG screenshots**, saved in the background.
+- **Capture health panel** with measured FPS, drops, errors, and recent stalls.
+- **Nintendo Switch 2 wake button** for an ESPHome wake device on the local
+  network (optional).
+- **Custom title bar**, borderless fullscreen, always-on-top, position pinning,
+  16:9 window resizing, and crisp per-monitor DPI scaling.
+- **Remembered window placement**, with safe fallback when a monitor has been
+  disconnected.
 
 ## Requirements
 
 - Windows 10 or 11, x64.
-- Elgato 4K X and its Windows driver.
-- For building: [Odin](https://odin-lang.org/), Visual Studio C++ Build Tools,
-  and a Windows SDK.
+- An Elgato 4K X with its Windows driver installed.
+- To build: [Odin](https://odin-lang.org/), Visual Studio C++ Build Tools, and a
+  Windows SDK. The Odin revision used for the current build is recorded in
+  [`ODIN_VERSION`](ODIN_VERSION). Odin changes quickly, so use that revision
+  when reproducing a build.
+- Optional, for video enhancements: a supported NVIDIA GPU, plus CMake and the
+  NVIDIA SDKs listed in [`native/video/sdk-versions.json`](native/video/sdk-versions.json)
+  to build the add-on.
 
-The exact Odin revision used for the current build is recorded in
-[`ODIN_VERSION`](ODIN_VERSION). Odin is evolving quickly, so use that revision
-when reproducing a release or diagnosing compiler-specific behavior.
-
-## Build
+## Building
 
 From PowerShell:
 
 ```powershell
-.\build.ps1
+.\build.ps1                         # optimized release build
+.\build.ps1 -Configuration Debug    # debug build with symbols
 ```
 
-The optimized executable and required third-party notices are written to
-`build/`. For a debug build, run:
+The script uses `odin.exe` from `PATH`, or `C:\Program Files\Odin\odin.exe` if
+it isn't on `PATH`. The build writes `build\elga-camera.exe` and copies
+`THIRD_PARTY_NOTICES.md` next to it.
 
-```powershell
-.\build.ps1 -Configuration Debug
-```
+Dear ImGui is vendored under `vendor/`. Miniaudio, libcurl, and stb_image_write
+come from Odin's own `vendor:` collection and are statically linked.
 
-The script finds `odin.exe` on `PATH` and falls back to
-`C:\Program Files\Odin\odin.exe`.
+`build.ps1` never needs the NVIDIA SDKs. The optional enhancement add-on, a C++
+D3D11 worker in `native/video/`, is built separately with `build-video.ps1`.
+Run it with no arguments to build and test just the SDK-free transport. To
+package the add-on, pass the SDK paths together with `-Package`, then copy the
+resulting `enhancements` folder next to `elga-camera.exe`. See
+[`docs/VIDEO_ENHANCEMENTS.md`](docs/VIDEO_ENHANCEMENTS.md) for the exact
+commands, the add-on's contents, and its validation status.
 
-To run the same local checks expected for contributions:
+## Using the app
 
-```powershell
-odin check src -vet -strict-style
-odin check src -vet -define:ELGA_FULLSCREEN_STRESS=true -define:ELGA_FORMAT_STRESS=true
-.\build.ps1 -Configuration Release
-```
+### Title bar
 
-There is intentionally no hosted CI workflow; validation is performed locally
-and hardware behavior is recorded with each release.
+| Location | Control |
+| --- | --- |
+| Left | **Fullscreen**, **Audio** (mute / volume / output), **Settings** |
+| Middle | Capture status: resolution and displayed FPS, or a connecting or unavailable state |
+| Right | **Switch wake**, then minimize, maximize, and close |
 
-## Controls
+Drag the empty parts of the bar to move the window. Window resizing keeps the
+video area at 16:9, with the bar's height added above it. In fullscreen, the
+bar is hidden. Hold the pointer at the top edge for two seconds to reveal it.
+The image shrinks to fit below the bar while it's visible.
 
-- The minimal title bar keeps fullscreen, audio, and Settings on the left,
-  with Switch wake beside the standard window commands on the right. Capture
-  status uses the space available between them.
-- In fullscreen, hover along the top edge for two seconds to reveal the title
-  bar. The full image fits below the visible bar; it fills the screen again
-  when the bar hides after the pointer leaves it.
-- Click **Fullscreen**, or press `F`/`F11`, to toggle fullscreen.
-- Open **Settings** for capture options, **Pin window position**, and **Always on top**.
-- Left-click the audio button to mute or unmute HDMI audio.
-- Hover over the audio button for about 300 ms to open the 0–100% software
-  volume slider. The selected volume is saved in `elga-camera.ini` beside the
-  executable. Changing the slider automatically unmutes audio; mute itself is
-  session-only and is not saved.
-- Right-click the audio button to select a Windows output device.
-- Press **F8**, or choose **Settings > Save screenshot**, to save the current
-  native-resolution frame as a PNG in **Pictures/Elga**, without the toolbar.
-  One screenshot is saved at a time; encoding runs in the background. If the
-  Pictures location is unavailable, the app uses `Screenshots` beside the executable.
-- Choose **Settings > Reconnect capture** to reopen the video capture device
-  with the current resolution and format preferences. Driver shutdown runs in
-  the background so window input remains responsive.
-- Open **Settings > Input EDID mode** to read or change the 4K X's current EDID
-  policy. **Merged** lets the card reconcile capture and display capabilities,
-  **Display** follows the attached display, and **Internal** uses the EDID
-  already stored on the card. The app does not save or reapply a preferred
-  mode. A change briefly interrupts the HDMI/capture signal while the card and
-  capture pipeline renegotiate; success is reported only after an independent
-  hardware readback. If the mode is unknown, use **Refresh mode** rather than
-  selecting the same mode again.
-- Open **Settings > Capture health** for measured capture and displayed FPS,
-  viewer drops, conversion/capture errors, recovery requests, and recent stalls
-  of at least 500 ms. Counts cover the current app session. Driver-side frame
-  loss and HDMI signal status are not inferred from these counters.
-- The normal window size, position, monitor, and always-on-top setting are
-  saved in `elga-window.ini` beside the executable. Maximized, minimized, and
-  fullscreen closes preserve normal placement; missing monitors fall back to
-  an available display. These settings are separate from audio volume.
-- Click the power icon on the right of the title bar to ask `switch2-waker.local` to wake the
-  Nintendo Switch 2. The request runs in the background and does not stall video. The
-  command is enabled only while the ESPHome wake entity is reachable.
-- Open **Settings > Color format** to use Auto or choose NV12 (8-bit 4:2:0), P010 (10-bit
-  4:2:0), YUY2 (8-bit 4:2:2), I420, RGB24, or MJPEG. I420 and MJPEG use NV12;
-  RGB24 is expanded to GPU-compatible 32-bit RGB without a YUV conversion.
-  This does not apply app-level color, range, contrast, or gamma adjustments.
-- Open **Settings > Resolution** to choose Auto or any native 16:9 resolution exposed for the
-  selected pixel format. Auto prefers the highest available 4K rate up to 60
-  FPS; selecting 3840x2160 explicitly uses its highest available rate. Lower
-  resolutions continue to use their highest available rate.
-- Press `P` to show or hide the displayed-frame FPS value in the title bar.
-- Press `Alt+F4` to close the app.
+### Keyboard
 
-The cursor remains visible in windowed and fullscreen modes. The title bar has
-its own space above the image. Window resizing keeps the video area at 16:9,
-with the bar's DPI-scaled height added above it.
+| Key | Action |
+| --- | --- |
+| `F` or `F11` | Toggle fullscreen |
+| `F8` | Save a screenshot |
+| `P` | Show or hide the FPS value in the title bar (shown by default) |
+| `Alt+F4` | Close |
 
-## Architecture
+### Audio
 
-Media Foundation selects the requested 16:9 resolution. Automatic resolution
-selection prefers the highest native 4K rate up to 60 FPS because the 4K X can
-advertise 120/144 FPS USB modes even for a 60 Hz HDMI signal; requesting those
-modes merely duplicates frames. Explicit resolutions and lower resolutions
-retain the highest-rate policy. Format Auto chooses the best GPU-native mode
-under the same policy and retains driver order for otherwise equal modes. The
-shared video texture is recreated at the
-native capture size, so lower-resolution modes do not retain a 4K allocation.
-The capture control thread is event-driven and remains asleep unless capture
-must stop or recover.
-Input EDID requests use the same capture worker and the live Media Foundation
-source selected for video. The worker discovers the matching KS extension node,
-checks its property support, validates protocol version 4, and reads the card
-before SET is enabled. It pauses sample reissuance and drains callbacks around
-each transaction. A write is never automatically retried: an uncertain result
-clears the selection, and any write that may have reached the card is followed
-by the existing asynchronous capture reconnect and fresh device enumeration.
-See [`docs/EDID_PROTOCOL.md`](docs/EDID_PROTOCOL.md) for the bounded transport
-contract and fixtures.
-Startup resolves Auto against the enumerated device modes. Recovery waits for
-Media Foundation's flush callback, and shutdown detaches outstanding callbacks
-before releasing capture resources. Unused source streams are deselected so
-unread samples do not accumulate.
-Native NV12, P010, and YUY2 frames remain GPU-to-GPU. I420 is converted and
-MJPEG is decoded to NV12; RGB24 is expanded to 32-bit RGB without crossing into
-YUV. Transformed frames stay on the GPU when the selected Windows
-transform supports DXGI surfaces; a CPU-buffer upload fallback handles
-software-only transforms. Software 2D surfaces use a read-only lock and their
-actual row pitch, avoiding the packed copies made by a generic buffer lock.
-RGB frames go directly to the shared presentation
-texture. For YUV frames, the Windows D3D11 video processor performs the
-mandatory RGB display conversion using the video-range samples and an explicit
-D3D11.1 DXGI matrix color space. A plain
-pass-through shader then presents that output through a D3D11 double-buffered
-flip-model swap chain. When minimized, the viewer releases its
-capture-sized textures and shrinks the swap chain to 1x1, then recreates only
-the active native mode on restore. The app has no custom color matrix, range expansion,
-gamma, contrast, or saturation adjustment and does not write the 4K X hardware
-color-range policy. The GPU-native hot path has no CPU frame download,
-CPU-side RGBA conversion, or CPU-to-GPU texture upload.
-When the output viewport covers the client area, the renderer also skips the
-otherwise redundant full-surface clear before drawing the video frame.
-Busy capture frames are dropped before buffer preparation. Repaints can reuse
-the last completed shared frame, keeping controls responsive when HDMI stalls.
-Capture invalidates the window for a coalesced paint after pending input,
-including during dragging. Presentation does not wait on a full display queue;
-busy frames retry through a timer even if no new capture arrives. Resize bursts
-apply only the latest client size at the next paint, and UI timers also tick
-from paints so continuous capture does not delay hover controls.
+- **Left-click** the audio button to mute or unmute. Mute lasts only for the
+  current session.
+- **Hover** over it for about 300 ms to open a 0–100% volume slider. Moving the
+  slider unmutes audio. The volume is saved.
+- **Right-click** it to pick a Windows output device, or the Windows default.
 
-The 4K X's 4K144 NV12 media type advertises full range even though its sample
-values are video range. The viewer does not copy that contradictory flag into
-its requested media type; it describes the native YUV sample encoding directly
-to the GPU video processor. This avoids the lifted blacks caused by treating
-video-range bytes as full-range bytes.
+The app finds the card's audio input by name. It looks for a capture endpoint
+named "Elgato 4K X", or failing that, any endpoint whose name contains "4K X".
+If none is found, video still works but audio is unavailable.
 
-Dear ImGui renders the custom title bar through its D3D11 backend and is
-skipped while that bar is hidden in fullscreen, except for brief screenshot
-notifications. Screenshot readback is requested only on demand, polls the GPU
-without waiting, and preserves shared-frame ownership. A worker converts the
-mapped BGRA frame to an opaque PNG and writes it without blocking the window.
+### Settings menu
 
-Audio uses Miniaudio's WASAPI backend in low-latency full-duplex mode. Volume is
-applied as linear software attenuation in the real-time callback. Frame-local Odin
-allocations use a fixed 64 KiB arena that is reset after every frame.
-Window callbacks separately reclaim their temporary allocations on return,
-preserving any outer callback's memory during reentry. Focus changes are
-coalesced while the overlay is hidden or minimized so input events do not
-accumulate while rendering is paused.
+- **Pin window position**: locks the window's top-left corner for this session.
+- **Always on top**: saved with the window layout.
+- **Save screenshot** (`F8`): saves the current frame at native resolution,
+  without the title bar, as
+  `Pictures\Elga\Elga-YYYYMMDD-HHMMSS-mmmZ-NNN.png` (UTC time). Redirected Pictures folders such as
+  OneDrive are respected. If Pictures isn't available, screenshots go to a
+  `Screenshots` folder next to the executable. Only one screenshot is saved at a
+  time.
+- **Reconnect capture**: reopens the video device with the current resolution
+  and format choices. The driver shutdown runs in the background, so the window
+  stays responsive.
+- **Capture health**: shows capture and displayed FPS, time since the last
+  frame, frames dropped by the viewer, conversion and capture errors, recovery
+  requests, and the five most recent stalls of 500 ms or longer. Counts cover
+  the current session. Frame loss inside the driver and HDMI signal status
+  aren't measured. While an enhancement is on, the panel also shows the
+  enhanced output rate, processing time, added delay, and missed deadlines.
+- **Video enhancements**: all three options start off, and the choices are
+  saved.
+  - **RTX Video Super Resolution** upscales the video to the window size, up to
+    4K.
+  - **Frame generation (2x)** interpolates frames. It adds about 33 ms of
+    latency at 60 FPS, or 67 ms at 30 FPS, and delays the audio to match. Your
+    display must support twice the source frame rate.
+  - **Game frame rate: 30 FPS** is for 30 FPS games sent in a 60 FPS signal,
+    such as on the Switch 2. It only affects frame generation.
 
-## Source layout
+  Each option shows **Unavailable** when the add-on, the GPU, or the driver
+  doesn't support it.
+- **Input EDID mode**: reads and changes the card's EDID policy.
+  - **Merged (recommended)**: the card combines the capture and display
+    capabilities.
+  - **Display**: follows the attached TV or monitor.
+  - **Internal**: uses the EDID already stored on the card.
+
+  A change briefly interrupts the HDMI signal while the card renegotiates. It
+  is reported as successful only after a separate readback confirms it. The app
+  doesn't save or reapply a preferred mode. If the mode shows as unknown, use
+  **Refresh mode** instead of picking the same mode again.
+- **Resolution**: Auto, or any native 16:9 resolution the selected format
+  offers. Auto picks the largest resolution. At 4K it prefers the highest rate
+  up to 60 FPS, or the lowest advertised rate if none is at or below 60. Picking
+  a resolution explicitly, including 3840x2160, uses that resolution's highest
+  rate.
+- **Color format**: Auto (the best GPU-native format) or any format the card
+  offers: NV12, P010, YUY2, I420, RGB24, or MJPEG.
+- **Show frame rate** (`P`).
+
+### Switch 2 wake (optional)
+
+The power button on the right of the title bar talks to an
+[ESPHome](https://esphome.io/) device on the local network. That device must:
+
+- be reachable at `switch2-waker.local`,
+- have the ESPHome `web_server` component enabled, and
+- expose a button entity named `Wake Switch 2`.
+
+The app checks the button every 5 seconds. The command is enabled only while
+the button is reachable. Pressing it sends
+`POST /button/Wake%20Switch%202/press` in the background, so video never
+stalls. Without such a device, the button stays disabled and the rest of the
+app is unaffected.
+
+### Saved settings
+
+Both files are written next to the executable, so the app stays portable.
+
+| File | Contents |
+| --- | --- |
+| `elga-camera.ini` | Audio volume |
+| `elga-window.ini` | Normal window size, position, monitor, and always-on-top |
+| `elga-video.ini` | Video enhancement choices |
+
+Closing the app while it's maximized, minimized, or fullscreen still saves the
+normal window placement. If the saved monitor is no longer connected, the
+window opens on an available display.
+
+## How it works
+
+**Capture.** Media Foundation's source reader opens the 4K X in the selected
+16:9 mode, and unused streams are deselected so unread samples don't pile up.
+A capture control thread stays asleep unless capture must stop, recover, or
+service an EDID request. Recovery waits for Media Foundation's flush callback.
+On shutdown, outstanding callbacks are detached before capture resources are
+released.
+
+**Video path.** NV12, P010, and YUY2 frames go from GPU to GPU. I420 and MJPEG
+are converted to NV12, and RGB24 to 32-bit RGB, by a Windows transform. Results
+stay on the GPU when the transform supports DXGI surfaces. Otherwise the app
+falls back to a CPU upload that uses a read-only lock and the buffer's real row
+pitch. The D3D11 video processor converts YUV frames to RGB using an explicit
+D3D11.1 color space. A pass-through shader then presents the result through a
+double-buffered flip-model swap chain. The native GPU path has no CPU frame
+download, CPU color conversion, or CPU-to-GPU upload.
+
+**Color range.** In its 4K144 NV12 mode, the 4K X labels its output as full
+range even though the sample values are video range. The viewer ignores that
+label and tells the video processor the real encoding, which avoids washed-out
+blacks.
+
+**Responsiveness.** If the presentation texture is busy, the incoming capture
+frame is dropped before any buffer work is done. Repaints reuse the last
+complete frame, so the controls keep working when HDMI stalls. Paints are
+combined so that queued input is handled first, and a timer retries busy
+presentations even when no new frame arrives. During a resize, only the latest
+size is applied. While the window is minimized, capture-sized textures are
+released and the swap chain shrinks to 1x1.
+
+**UI.** Dear ImGui draws the title bar through its D3D11 backend. It is skipped
+entirely while the bar is hidden in fullscreen, except to show screenshot
+messages. Screenshots copy the frame back from the GPU only when you ask for
+one, and they don't block the window: a worker thread encodes the PNG.
+
+**Audio.** Miniaudio runs WASAPI in low-latency full-duplex mode, capturing the
+card's audio input and playing it on the selected output. Volume is applied as
+linear gain in the real-time callback. When frame generation adds video delay,
+a preallocated ring buffer in the same callback delays audio by the same
+amount, up to 250 ms.
+
+**Video enhancements.** The optional add-on runs on its own D3D11 worker with
+bounded shared-texture queues, and frames stay on the GPU. Capture callbacks
+never wait for it. If the add-on is missing or fails, the viewer falls back to
+the normal path. See [`docs/VIDEO_ENHANCEMENTS.md`](docs/VIDEO_ENHANCEMENTS.md).
+
+**Memory.** Per-frame allocations come from a fixed 64 KiB arena that is reset
+after every frame. Window callbacks free their temporary allocations when they
+return.
+
+**EDID.** EDID requests use the same capture worker and the same live Media
+Foundation source as video. Before enabling writes, the worker finds the
+matching KS extension node, checks property support, confirms protocol
+version 4, and reads the current mode. Writes are never retried automatically.
+After any write that may have reached the card, capture reconnects and devices
+are enumerated again. See [`docs/EDID_PROTOCOL.md`](docs/EDID_PROTOCOL.md) for
+the transport details and test fixtures.
+
+## Hardware verification
+
+On the development system, the 4K X negotiated 3840x2160 NV12 at 144.001 FPS.
+The viewer captured and presented about 144 frames per second and completed
+twelve consecutive fullscreen transitions without crashing. NV12, P010, and
+YUY2 were also tested at native 720p, 1080p, 1440p, and 2160p.
+
+On 2026-09-11, the EDID transport was checked on a connected 4K X (PID `009B`).
+Protocol identification, changes to Merged, Display, and Internal, separate
+readback, capture recovery, minimize and restore, and refresh all passed, and
+the original Merged mode was restored afterwards. Physical unplug and replug
+testing is still pending.
+
+**EDID troubleshooting:** close other capture apps, connect the 4K X directly to
+the PC, make sure a display is attached to the card's HDMI output, reopen the
+viewer, and choose **Refresh mode**. EDID writes stay disabled whenever the
+protocol or the current mode can't be verified.
+
+## Repository layout
 
 ```text
-src/        Application source and local Windows API bindings
-vendor/     Vendored Dear ImGui Odin bindings and static library
-docs/       Maintainer and release documentation
-.github/    Issue and pull-request templates
-build.ps1   Release/debug build entry point
+src/             Application source, tests, and local Windows API bindings
+native/video/    Optional C++ NVIDIA video enhancement backend (CMake)
+vendor/          Vendored Dear ImGui Odin bindings and static library
+docs/            EDID protocol, video enhancements, release checklist, reviews
+.github/         Issue and pull request templates
+build.ps1        Release and debug build script for the viewer
+build-video.ps1  Build, test, and package script for the enhancement add-on
 ```
 
 ## Contributing and releases
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, verification, and hardware
-reporting expectations. Bugs and feature requests should use the GitHub issue
-templates so capture mode and system details are not omitted.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) lists the setup, the required local checks
+(`odin check`, `odin test`, the stress-define build, the optional GPU tests, and
+a release build), and what to report from hardware testing. There's no hosted
+CI, so these checks are run locally. Please use the GitHub issue templates so
+the capture mode and system details are included.
 
-Releases are prepared manually using [`docs/RELEASING.md`](docs/RELEASING.md).
+Releases are prepared by hand using [`docs/RELEASING.md`](docs/RELEASING.md).
 User-visible changes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
-
-## Verified hardware path
-
-On the development system, the Elgato 4K X negotiated 3840x2160 NV12 at
-144.001 FPS. The viewer sustained approximately 144 captured and presented
-frames per second and completed twelve consecutive fullscreen transitions
-without a crash. NV12, P010, and YUY2 paths were also exercised across native
-720p, 1080p, 1440p, and 2160p modes.
-
-On 2026-09-11, the standalone EDID transport was verified on a connected 4K X
-(PID `009B`): protocol identification, Merged/Display/Internal changes, separate
-mode readback, capture recovery, minimize/restore, and refresh all passed.
-The original Merged mode was restored. Tests include captured request/reply
-fixtures, framing/checksum validation, and mocked failure handling. Physical
-unplug/replug acceptance remains pending. The app keeps SET unavailable whenever
-protocol identification or current-mode readback cannot be verified. For EDID
-troubleshooting, close other capture applications, reconnect the 4K X directly
-to the PC, confirm the display is attached to the card's HDMI output, reopen
-the viewer, and choose **Refresh mode**. A synchronous driver call itself cannot
-be cancelled; shutdown and minimize cancellation is observed between calls.
-
-Elgato is a trademark of its respective owner. This project is not affiliated
-with or endorsed by Elgato.
 
 ## License
 
-No project license has been selected yet. Publishing source code without a
-license does not grant permission to copy, modify, or redistribute it. Add an
-appropriate root `LICENSE` file before treating Elga Camera as an open-source
-project. Licenses and notices for bundled dependencies are documented in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+No project license has been chosen yet. Publishing the source without a license
+doesn't grant anyone permission to copy, modify, or redistribute it. Add a root
+`LICENSE` file before treating Elga Camera as open source. Licenses for bundled
+dependencies are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+Elgato is a trademark of its respective owner. This project is not affiliated
+with or endorsed by Elgato.
