@@ -72,6 +72,13 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ### Changed
 
+- Internal cleanup: shared helpers for HRESULT checks, COM release, settings
+  files, INI parsing, and device-name matching; capture selection is one
+  `Capture_Config` value; the capture thread's EDID and recovery paths are
+  split into small procedures. Unused title-bar icons were removed.
+- Switch wake tooltips share one wording table for health and request errors.
+- The EDID menu reports the extension as unavailable, instead of
+  "verification failed: none", when the capture source cannot be opened.
 - Simplified the title bar to fullscreen, audio, and Settings on the left,
   with Switch wake beside the window commands on the right. Capture format,
   resolution, position pinning, and always-on-top are in Settings; capture

@@ -146,7 +146,7 @@ capture_rejected_buffer_cleanup_test :: proc(t: ^testing.T) {
 	defer MFShutdown()
 	// Real software buffers exercise COM ownership without a capture card or GPU.
 	// Each undersized frame must release its temporary references and 2D lock.
-	r := Renderer{capture_format = .NV12, capture_width = 64, capture_height = 36}
+	r := Renderer{capture_format = .NV12, mode = {width = 64, height = 36}}
 	for iteration in 0..<32 {
 		buffer: ^IMFMediaBuffer
 		sample: ^IMFSample
@@ -253,7 +253,7 @@ capture_mode_selection_test :: proc(t: ^testing.T) {
 capture_failure_while_minimized_test :: proc(t: ^testing.T) {
 	r := Renderer{
 		ready = true, capture_suspended = true, capture_generation = 3,
-		capture_format = .P010, last_working_valid = true, last_working_format = .NV12,
+		capture_format = .P010, last_working_valid = true, last_working = {capture_format = .NV12},
 	}
 	// A queued failure must not recreate GPU resources or start a hidden capture.
 	renderer_handle_capture_failure(&r, 3)

@@ -3,9 +3,7 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:os"
-import "core:path/filepath"
 import "core:strconv"
-import "core:strings"
 import win32 "core:sys/windows"
 
 WINDOW_LAYOUT_FILE :: "elga-window.ini"
@@ -34,7 +32,7 @@ Window_Layout_Monitor_Search :: struct {
 // Call before showing the window and before sizing its renderer. A missing or
 // invalid file leaves the ordinary startup window in place.
 window_layout_restore :: proc(state: ^Window_Layout_State, hwnd: win32.HWND) -> bool {
-	path, _, paths_ok := window_layout_paths()
+	path, _, paths_ok := settings_paths(WINDOW_LAYOUT_FILE)
 	loaded := paths_ok && window_layout_load_from_path(state, path)
 	if loaded {
 		search := Window_Layout_Monitor_Search{name = state.monitor}
@@ -159,21 +157,6 @@ window_layout_valid :: proc(layout: Window_Layout) -> bool {
 	return true
 }
 
-window_layout_paths :: proc() -> (path, temp_path: string, ok: bool) {
-	directory, err := os.get_executable_directory(context.temp_allocator)
-	if err != nil do return "", "", false
-	return window_layout_paths_for_directory(directory, os.get_pid())
-}
-
-window_layout_paths_for_directory :: proc(directory: string, process_id: int) -> (path, temp_path: string, ok: bool) {
-	settings_path, err := filepath.join([]string{directory, WINDOW_LAYOUT_FILE}, context.temp_allocator)
-	if err != nil do return "", "", false
-	temp_name := fmt.aprintf("elga-window.ini.%d.tmp", process_id, allocator = context.temp_allocator)
-	settings_temp_path, temp_err := filepath.join([]string{directory, temp_name}, context.temp_allocator)
-	if temp_err != nil do return "", "", false
-	return settings_path, settings_temp_path, true
-}
-
 window_layout_load_from_path :: proc(state: ^Window_Layout_State, path: string) -> bool {
 	file, err := os.open(path)
 	if err != nil do return false
@@ -191,7 +174,7 @@ window_layout_load_from_path :: proc(state: ^Window_Layout_State, path: string) 
 
 window_layout_save :: proc(state: ^Window_Layout_State) -> bool {
 	if !state.dirty do return !state.save_failed
-	path, temp_path, ok := window_layout_paths()
+	path, temp_path, ok := settings_paths(WINDOW_LAYOUT_FILE)
 	if !ok {
 		state.save_failed = true
 		return false
@@ -206,9 +189,7 @@ window_layout_save_to_paths :: proc(state: ^Window_Layout_State, path, temp_path
 		state.save_failed = true
 		return false
 	}
-	settings := window_layout_format(buffer[:], state.layout)
-	if os.write_entire_file(temp_path, settings) != nil || os.rename(temp_path, path) != nil {
-		_ = os.remove(temp_path)
+	if !settings_write(path, temp_path, window_layout_format(buffer[:], state.layout)) {
 		state.save_failed = true
 		return false
 	}
@@ -237,20 +218,9 @@ window_layout_parse :: proc(data: string) -> (layout: Window_Layout, ok: bool) {
 	keys := [12]string{"version", "x", "y", "width", "height", "work_x", "work_y", "work_width", "work_height", "dpi", "always_on_top", "monitor"}
 	values: [11]i32
 	seen: u32
-	in_section := false
-	remaining := data
-	for raw_line in strings.split_lines_iterator(&remaining) {
-		line := strings.trim_space(raw_line)
-		if len(line) == 0 || line[0] == ';' || line[0] == '#' do continue
-		if line[0] == '[' {
-			in_section = line == "[window]"
-			continue
-		}
-		if !in_section do continue
-		equals := strings.index_byte(line, '=')
-		if equals < 0 do return {}, false
-		key := strings.trim_space(line[:equals])
-		value := strings.trim_space(line[equals+1:])
+	it := Ini_Iterator{data = data, section = "[window]"}
+	for key, value in ini_next(&it) {
+		if key == "" do return {}, false
 		for expected, index in keys {
 			if key != expected do continue
 			bit := u32(1)<<u32(index)

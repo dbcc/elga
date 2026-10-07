@@ -7,11 +7,7 @@ import "core:time"
 // Releasing a USB capture source can take time inside the driver. Only its
 // shutdown runs on this worker; GPU resource changes stay on the window thread.
 renderer_request_reconnect :: proc(r: ^Renderer, count_recovery := true) -> bool {
-	if r == nil || !r.ready || r.capture_suspended || r.drawing || r.reconnect_thread != nil do return false
-	if sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) != 0 ||
-	   sync.atomic_load_explicit(&r.edid_request_kind, .Acquire) != u32(EDID_Request_Kind.None) {
-		return false
-	}
+	if r == nil || !r.ready || r.capture_suspended || r.drawing || r.reconnect_thread != nil || renderer_edid_in_flight(r) do return false
 	r.reconnect_error = false
 	sync.atomic_store_explicit(&r.reconnect_done, 0, .Release)
 	r.reconnect_thread = thread.create(renderer_reconnect_thread_proc, .Normal, "capture-reconnect")
@@ -53,7 +49,9 @@ renderer_update_reconnect :: proc(r: ^Renderer) -> bool {
 	r.last_video_present = {}
 	r.fps_window_frames = 0
 	r.fps_window_start = time.now()
-	renderer_apply_capture_configuration(r, r.capture_format, r.requested_width, r.requested_height, r.format_auto)
+	config := r.config
+	config.resource_width, config.resource_height = 0, 0
+	renderer_apply_capture_configuration(r, config)
 	r.reconnect_error = !r.ready || !sync.atomic_load_explicit(&r.capture_running, .Acquire)
 	if r.reconnect_error && sync.atomic_load_explicit(&r.edid_restore_pending, .Acquire) != 0 {
 		sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Applied_Capture_Unavailable), .Release)

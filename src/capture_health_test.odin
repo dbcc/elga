@@ -8,7 +8,7 @@ import dxgi "vendor:directx/dxgi"
 
 @(test)
 capture_health_observed_rates_test :: proc(t: ^testing.T) {
-	r := Renderer{capture_running = true, capture_ready = 1, capture_fps_num = 144, capture_fps_den = 1}
+	r := Renderer{capture_running = true, capture_ready = 1, mode = {fps_num = 144, fps_den = 1}}
 	start := i64(time.Second)
 	capture_health_reset_timing(&r, start)
 	capture_health_update(&r, start)

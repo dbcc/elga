@@ -45,9 +45,9 @@ capture_gpu_roundtrip :: proc(t: ^testing.T) {
 		format := Capture_Format(path_format%CAPTURE_FORMAT_COUNT)
 		if bottom_up do format = .RGB24
 		r.capture_format = format
-		r.capture_width, r.capture_height = 32, 18
-		r.capture_matrix = 1
-		r.capture_range = .Limited
+		r.mode.width, r.mode.height = 32, 18
+		r.mode.yuv_matrix = 1
+		r.mode.range = .Limited
 		r.video_sequence = 0
 		if !testing.expect(t, video_resources_create(&r, format, 32, 18)) do return
 		defer video_resources_release(&r)
@@ -115,7 +115,7 @@ capture_gpu_roundtrip :: proc(t: ^testing.T) {
 			}
 			buffer_2d.Unlock2D(buffer_2d)
 			// Surface pitch must win over stale/default media-type metadata.
-			r.capture_stride = 1
+			r.mode.stride = 1
 		} else {
 			if !testing.expect(t, !failed(MFCreateMemoryBuffer(u32(length), &buffer))) do return
 			data: ^u8
@@ -131,7 +131,7 @@ capture_gpu_roundtrip :: proc(t: ^testing.T) {
 		capture_copy_sample(&r, sample)
 		testing.expect_value(t, r.video_sequence, u64(1))
 		testing.expect_value(t, r.video_vertical_flip, u32(1) if bottom_up else u32(0))
-		r.capture_stride = 0
+		r.mode.stride = 0
 		capture_copy_sample(&r, sample)
 		testing.expect_value(t, r.video_sequence, u64(1)) // Render still owns key 1.
 		if !testing.expect(t, r.render_mutex.AcquireSync(r.render_mutex, 1, 1000) == 0) do return

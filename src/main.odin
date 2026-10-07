@@ -11,9 +11,11 @@ WINDOW_CLASS := win32.L("ElgaCameraOdinWindow")
 WINDOW_TITLE := win32.L("Elgato 4K X")
 ASPECT_NUM   :: 16
 ASPECT_DEN   :: 9
+DEFAULT_VIDEO_WIDTH :: 1280
 MIN_CLIENT_W :: 320
 MIN_CLIENT_H :: 180
 FRAME_ARENA_SIZE :: 64 * 1024
+SCREENSHOT_FEEDBACK_DURATION :: 4*time.Second
 UI_TIMER           :: 1
 REDRAW_RETRY_TIMER  :: 2
 UI_ACTION_MESSAGE   :: win32.WM_APP + 2
@@ -23,6 +25,7 @@ EDID_RESULT_MESSAGE    :: win32.WM_APP + 5
 ELGA_FULLSCREEN_STRESS :: #config(ELGA_FULLSCREEN_STRESS, false)
 ELGA_FORMAT_STRESS     :: #config(ELGA_FORMAT_STRESS, false)
 
+// UI widgets post these so state changes run outside ImGui frame building.
 UI_Action :: enum u32 {
 	Fullscreen,
 	Pin,
@@ -59,6 +62,7 @@ App :: struct {
 	frame_memory:  [FRAME_ARENA_SIZE]byte,
 	windowed_rect: win32.RECT,
 	windowed_style: win32.LONG_PTR,
+	// The custom title bar is persistent while windowed and hover-revealed in fullscreen.
 	controls_visible: bool,
 	hover_started:    time.Time,
 	last_ui_tick:     time.Time,
@@ -67,66 +71,41 @@ App :: struct {
 }
 
 app: App
-fullscreen_stress_started: time.Time
-fullscreen_stress_step: int
-format_stress_started: time.Time
-format_stress_step: int
 
 main :: proc() {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	// Prevent Windows from bitmap-scaling the window and blurring the capture UI.
 	win32.SetProcessDpiAwarenessContext(win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
 
-	com_hr := win32.CoInitializeEx(nil, .MULTITHREADED)
-	if failed(com_hr) {
-		fatal("COM initialization failed")
-	}
+	if failed(win32.CoInitializeEx(nil, .MULTITHREADED)) do fatal("COM initialization failed")
 	defer win32.CoUninitialize()
 
-	instance := win32.GetModuleHandleW(nil)
+	instance := cast(win32.HINSTANCE)win32.GetModuleHandleW(nil)
 	wc := win32.WNDCLASSEXW {
 		cbSize        = size_of(win32.WNDCLASSEXW),
 		style         = win32.CS_HREDRAW | win32.CS_VREDRAW | win32.CS_OWNDC,
 		lpfnWndProc   = window_proc,
-		hInstance     = cast(win32.HINSTANCE)instance,
+		hInstance     = instance,
 		hCursor       = win32.LoadCursorA(nil, win32.IDC_ARROW),
 		lpszClassName = cstring16(WINDOW_CLASS),
 	}
-	if win32.RegisterClassExW(&wc) == 0 {
-		fatal("RegisterClassExW failed")
-	}
+	if win32.RegisterClassExW(&wc) == 0 do fatal("RegisterClassExW failed")
 
-	client_w := 1280
-	client_h := client_w * ASPECT_DEN / ASPECT_NUM + int(title_bar_height_for_dpi(96))
 	// Retain the standard top-level window semantics and DWM shadow. WM_NCCALCSIZE
 	// below removes its non-client frame so the client-rendered bar is the only
 	// title bar the user sees.
-	style := win32.WS_OVERLAPPEDWINDOW
-
+	width, height := default_window_size(win32.USER_DEFAULT_SCREEN_DPI)
 	hwnd := win32.CreateWindowExW(
-		0,
-		cstring16(WINDOW_CLASS),
-		cstring16(WINDOW_TITLE),
-		style,
-		win32.CW_USEDEFAULT,
-		win32.CW_USEDEFAULT,
-		i32(client_w),
-		i32(client_h),
-		nil,
-		nil,
-		cast(win32.HINSTANCE)instance,
-		nil,
+		0, cstring16(WINDOW_CLASS), cstring16(WINDOW_TITLE), win32.WS_OVERLAPPEDWINDOW,
+		win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, width, height,
+		nil, nil, instance, nil,
 	)
-	if hwnd == nil {
-		fatal("CreateWindowExW failed")
-	}
+	if hwnd == nil do fatal("CreateWindowExW failed")
 	// Window dimensions are physical pixels in per-monitor-aware mode. Preserve
-	// the intended 1280x720 video area plus its title bar on scaled displays.
-	window_dpi := win32.GetDpiForWindow(hwnd)
-	if window_dpi != win32.USER_DEFAULT_SCREEN_DPI {
-		scaled_client_w := client_w*int(window_dpi)/int(win32.USER_DEFAULT_SCREEN_DPI)
-		scaled_client_h := (client_w*ASPECT_DEN/ASPECT_NUM)*int(window_dpi)/int(win32.USER_DEFAULT_SCREEN_DPI) + int(title_bar_height_for_dpi(window_dpi))
-		win32.SetWindowPos(hwnd, nil, 0, 0, i32(scaled_client_w), i32(scaled_client_h), win32.SWP_NOMOVE | win32.SWP_NOZORDER | win32.SWP_NOACTIVATE)
+	// the intended video area plus its title bar on scaled displays.
+	if dpi := win32.GetDpiForWindow(hwnd); dpi != win32.USER_DEFAULT_SCREEN_DPI {
+		width, height = default_window_size(dpi)
+		win32.SetWindowPos(hwnd, nil, 0, 0, width, height, win32.SWP_NOMOVE | win32.SWP_NOZORDER | win32.SWP_NOACTIVATE)
 	}
 	// Force Windows to recalculate the client area before the first ShowWindow;
 	// otherwise DWM may keep the standard caption until the first resize.
@@ -137,17 +116,13 @@ main :: proc() {
 	window_layout_restore(&app.layout, hwnd)
 	app.always_on_top = app.layout.always_on_top
 	app.fps_visible = true
+	app.controls_visible = true
 	mem.arena_init(&app.frame_arena, app.frame_memory[:])
 
 	client: win32.RECT
 	win32.GetClientRect(hwnd, &client)
-	if !renderer_init(&app.renderer, hwnd, u32(client.right), u32(client.bottom)) {
-		fatal("D3D11 initialization failed")
-	}
-	if !imgui_ui_init(&app.ui, &app.renderer) {
-		fatal("Dear ImGui DX11 initialization failed")
-	}
-	ui_init_state()
+	if !renderer_init(&app.renderer, hwnd, u32(client.right), u32(client.bottom)) do fatal("D3D11 initialization failed")
+	if !imgui_ui_init(&app.ui, &app.renderer) do fatal("Dear ImGui DX11 initialization failed")
 	audio_init(&app.audio)
 	wake_init(&app.wake)
 	win32.SetTimer(hwnd, UI_TIMER, 100, nil)
@@ -156,10 +131,7 @@ main :: proc() {
 	win32.UpdateWindow(hwnd)
 
 	msg: win32.MSG
-	for {
-		if win32.GetMessageW(&msg, nil, 0, 0) <= 0 {
-			break
-		}
+	for win32.GetMessageW(&msg, nil, 0, 0) > 0 {
 		win32.TranslateMessage(&msg)
 		win32.DispatchMessageW(&msg)
 	}
@@ -216,92 +188,54 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		renderer_handle_edid_result(&app.renderer, u32(wparam), u32(lparam))
 		return 0
 	case win32.WM_SIZE:
-		if app.renderer.ready && wparam == win32.SIZE_MINIMIZED {
+		if !app.renderer.ready do return 0
+		if wparam == win32.SIZE_MINIMIZED {
 			renderer_suspend_capture(&app.renderer)
-		} else if app.renderer.ready {
-			w := u32(lparam & 0xffff)
-			h := u32((lparam >> 16) & 0xffff)
-			if w > 0 && h > 0 {
-				renderer_request_resize(&app.renderer, w, h)
-			}
+		} else {
+			renderer_request_resize(&app.renderer, u32(lparam & 0xffff), u32((lparam >> 16) & 0xffff))
 		}
 		return 0
 	case win32.WM_TIMER:
-		if u32(wparam) == UI_TIMER do ui_tick()
-		if u32(wparam) == REDRAW_RETRY_TIMER {
+		switch wparam {
+		case UI_TIMER:
+			ui_tick()
+		case REDRAW_RETRY_TIMER:
 			renderer_cancel_redraw_retry(&app.renderer)
 			renderer_request_redraw(&app.renderer)
 		}
 		return 0
 	case win32.WM_DPICHANGED:
 		imgui_ui_set_dpi(&app.ui, u32(wparam & 0xffff))
-		if !app.fullscreen {
-			suggested := cast(^win32.RECT)uintptr(lparam)
-			if suggested != nil {
-				win32.SetWindowPos(
-					hwnd, nil,
-					suggested.left, suggested.top,
-					suggested.right-suggested.left, suggested.bottom-suggested.top,
-					win32.SWP_NOZORDER | win32.SWP_NOACTIVATE,
-				)
-			}
+		suggested := cast(^win32.RECT)uintptr(lparam)
+		if !app.fullscreen && suggested != nil {
+			win32.SetWindowPos(
+				hwnd, nil,
+				suggested.left, suggested.top,
+				suggested.right-suggested.left, suggested.bottom-suggested.top,
+				win32.SWP_NOZORDER | win32.SWP_NOACTIVATE,
+			)
 		}
 		renderer_request_redraw(&app.renderer)
 		return 0
 	case win32.WM_NCCALCSIZE:
-		if wparam != 0 {
-			// Returning zero makes the whole window client area and removes the
-			// standard caption. Maximized windows retain the system resize inset
-			// so the custom bar is not clipped beyond the monitor work area.
-			if !app.fullscreen && win32.IsZoomed(hwnd) {
-				params := cast(^win32.NCCALCSIZE_PARAMS)uintptr(lparam)
-				dpi := win32.GetDpiForWindow(hwnd)
-				border_x := win32.GetSystemMetricsForDpi(win32.SM_CXSIZEFRAME, dpi) + win32.GetSystemMetricsForDpi(win32.SM_CXPADDEDBORDER, dpi)
-				border_y := win32.GetSystemMetricsForDpi(win32.SM_CYSIZEFRAME, dpi) + win32.GetSystemMetricsForDpi(win32.SM_CXPADDEDBORDER, dpi)
-				params.rgrc[0].left += border_x
-				params.rgrc[0].top += border_y
-				params.rgrc[0].right -= border_x
-				params.rgrc[0].bottom -= border_y
-			}
-			return 0
+		if wparam == 0 do break
+		// Returning zero makes the whole window client area and removes the
+		// standard caption. Maximized windows retain the system resize inset
+		// so the custom bar is not clipped beyond the monitor work area.
+		if !app.fullscreen && win32.IsZoomed(hwnd) {
+			params := cast(^win32.NCCALCSIZE_PARAMS)uintptr(lparam)
+			border_x, border_y := resize_border(hwnd)
+			params.rgrc[0].left += border_x
+			params.rgrc[0].top += border_y
+			params.rgrc[0].right -= border_x
+			params.rgrc[0].bottom -= border_y
 		}
+		return 0
 	case win32.WM_NCHITTEST:
-		if app.fullscreen do return win32.HTCLIENT
-		point := win32.POINT{win32.GET_X_LPARAM(lparam), win32.GET_Y_LPARAM(lparam)}
-		win32.ScreenToClient(hwnd, &point)
-		client: win32.RECT
-		win32.GetClientRect(hwnd, &client)
-		if !win32.IsZoomed(hwnd) {
-			dpi := win32.GetDpiForWindow(hwnd)
-			border_x := win32.GetSystemMetricsForDpi(win32.SM_CXSIZEFRAME, dpi) + win32.GetSystemMetricsForDpi(win32.SM_CXPADDEDBORDER, dpi)
-			border_y := win32.GetSystemMetricsForDpi(win32.SM_CYSIZEFRAME, dpi) + win32.GetSystemMetricsForDpi(win32.SM_CXPADDEDBORDER, dpi)
-			left, right := point.x < border_x, point.x >= client.right-border_x
-			top, bottom := point.y < border_y, point.y >= client.bottom-border_y
-			if top && left do return win32.HTTOPLEFT
-			if top && right do return win32.HTTOPRIGHT
-			if bottom && left do return win32.HTBOTTOMLEFT
-			if bottom && right do return win32.HTBOTTOMRIGHT
-			if left do return win32.HTLEFT
-			if right do return win32.HTRIGHT
-			if top do return win32.HTTOP
-			if bottom do return win32.HTBOTTOM
-		}
-		dpi_scale := max(f32(win32.GetDpiForWindow(hwnd))/f32(win32.USER_DEFAULT_SCREEN_DPI), 1.0)
-		controls_end := title_bar_controls_end(dpi_scale)
-		right_controls_start := title_bar_wake_start(f32(client.right), dpi_scale)
-		in_drag_region := f32(point.x) < TITLE_BAR_DRAG_WIDTH*dpi_scale ||
-			(f32(point.x) >= controls_end && f32(point.x) < right_controls_start)
-		if point.x >= 0 && in_drag_region && point.y >= 0 &&
-			f32(point.y) < TITLE_BAR_HEIGHT*dpi_scale {
-			return win32.HTCAPTION
-		}
-		return win32.HTCLIENT
+		return hit_test(hwnd, lparam)
 	case win32.WM_MOVING:
 		if app.position_pin {
-			r := cast(^win32.RECT)uintptr(lparam)
-			w, h := r.right-r.left, r.bottom-r.top
-			r.left, r.top = app.pinned_x, app.pinned_y
-			r.right, r.bottom = r.left+w, r.top+h
+			pin_rect(cast(^win32.RECT)uintptr(lparam))
 			return 1
 		}
 	case win32.WM_SETCURSOR:
@@ -312,15 +246,12 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 	case win32.WM_SIZING:
 		if !app.fullscreen {
 			r := cast(^win32.RECT)uintptr(lparam)
-			enforce_16_9(r, u32(wparam))
-			if app.position_pin && r != nil {
-				w, h := r.right-r.left, r.bottom-r.top
-				r.left, r.top = app.pinned_x, app.pinned_y
-				r.right, r.bottom = r.left+w, r.top+h
-			}
+			enforce_16_9_for_dpi(r, u32(wparam), win32.GetDpiForWindow(hwnd))
+			if app.position_pin do pin_rect(r)
 			return 1
 		}
 	case win32.WM_KEYDOWN:
+		// Ignore auto-repeat so a held key does not toggle repeatedly.
 		if lparam & (win32.LPARAM(1)<<30) != 0 do return 0
 		switch u32(wparam) {
 		case u32('F'), win32.VK_F11:
@@ -333,12 +264,10 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		}
 		return 0
 	case win32.WM_EXITSIZEMOVE:
-		window_layout_observe(&app.layout, hwnd, app.fullscreen, app.always_on_top)
-		window_layout_save(&app.layout)
+		save_window_layout(hwnd)
 		return 0
 	case win32.WM_CLOSE:
-		window_layout_observe(&app.layout, hwnd, app.fullscreen, app.always_on_top)
-		window_layout_save(&app.layout)
+		save_window_layout(hwnd)
 		win32.DestroyWindow(hwnd)
 		return 0
 	case win32.WM_DESTROY:
@@ -350,9 +279,53 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 	return win32.DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-ui_init_state :: proc() {
-	// The custom title bar is persistent while the app is windowed.
-	app.controls_visible = true
+// Resize edges, the caption drag region, and client controls for the borderless window.
+hit_test :: proc(hwnd: win32.HWND, lparam: win32.LPARAM) -> win32.LRESULT {
+	if app.fullscreen do return win32.HTCLIENT
+	point := win32.POINT{win32.GET_X_LPARAM(lparam), win32.GET_Y_LPARAM(lparam)}
+	win32.ScreenToClient(hwnd, &point)
+	client: win32.RECT
+	win32.GetClientRect(hwnd, &client)
+	if !win32.IsZoomed(hwnd) {
+		border_x, border_y := resize_border(hwnd)
+		left, right := point.x < border_x, point.x >= client.right-border_x
+		top, bottom := point.y < border_y, point.y >= client.bottom-border_y
+		if top && left do return win32.HTTOPLEFT
+		if top && right do return win32.HTTOPRIGHT
+		if bottom && left do return win32.HTBOTTOMLEFT
+		if bottom && right do return win32.HTBOTTOMRIGHT
+		if left do return win32.HTLEFT
+		if right do return win32.HTRIGHT
+		if top do return win32.HTTOP
+		if bottom do return win32.HTBOTTOM
+	}
+	s := dpi_scale(win32.GetDpiForWindow(hwnd))
+	x, y := f32(point.x), f32(point.y)
+	in_drag_region := x < TITLE_BAR_DRAG_WIDTH*s || (x >= title_bar_controls_end(s) && x < title_bar_wake_start(f32(client.right), s))
+	if point.x >= 0 && point.y >= 0 && in_drag_region && y < TITLE_BAR_HEIGHT*s do return win32.HTCAPTION
+	return win32.HTCLIENT
+}
+
+resize_border :: proc(hwnd: win32.HWND) -> (x, y: i32) {
+	dpi := win32.GetDpiForWindow(hwnd)
+	padding := win32.GetSystemMetricsForDpi(win32.SM_CXPADDEDBORDER, dpi)
+	return win32.GetSystemMetricsForDpi(win32.SM_CXSIZEFRAME, dpi) + padding, win32.GetSystemMetricsForDpi(win32.SM_CYSIZEFRAME, dpi) + padding
+}
+
+// Keeps a pinned window's origin fixed while preserving the proposed size.
+pin_rect :: proc(r: ^win32.RECT) {
+	if r == nil do return
+	r.right, r.bottom = app.pinned_x+r.right-r.left, app.pinned_y+r.bottom-r.top
+	r.left, r.top = app.pinned_x, app.pinned_y
+}
+
+save_window_layout :: proc(hwnd: win32.HWND) {
+	window_layout_observe(&app.layout, hwnd, app.fullscreen, app.always_on_top)
+	window_layout_save(&app.layout)
+}
+
+screenshot_feedback_visible :: proc() -> bool {
+	return screenshot_busy(&app.screenshot) || time.diff(time.now(), app.screenshot_feedback_until) > 0
 }
 
 ui_tick :: proc() {
@@ -361,15 +334,17 @@ ui_tick :: proc() {
 	// to 10 Hz, so a busy capture cannot delay hover controls or wake feedback.
 	if app.last_ui_tick != {} && time.diff(app.last_ui_tick, now) < 100*time.Millisecond do return
 	app.last_ui_tick = now
-	wake_changed := wake_update(&app.wake)
-	reconnect_changed := renderer_update_reconnect(&app.renderer)
+	changed := wake_update(&app.wake)
+	changed |= renderer_update_reconnect(&app.renderer)
 	capture_health_update(&app.renderer)
-	screenshot_changed := false
-	if !app.renderer.drawing do screenshot_changed = screenshot_update(&app.screenshot, &app.renderer)
-	if screenshot_changed do app.screenshot_feedback_until = time.time_add(now, 4*time.Second)
-	feedback_shown := screenshot_busy(&app.screenshot) || time.diff(now, app.screenshot_feedback_until) > 0
-	feedback_changed := feedback_shown != app.screenshot_feedback_shown
+	if !app.renderer.drawing && screenshot_update(&app.screenshot, &app.renderer) {
+		app.screenshot_feedback_until = time.time_add(now, SCREENSHOT_FEEDBACK_DURATION)
+		changed = true
+	}
+	feedback_shown := screenshot_feedback_visible()
+	changed |= feedback_shown != app.screenshot_feedback_shown
 	app.screenshot_feedback_shown = feedback_shown
+
 	point: win32.POINT
 	win32.GetCursorPos(&point)
 	window_rect: win32.RECT
@@ -377,21 +352,17 @@ ui_tick :: proc() {
 	bar_height := title_bar_height_for_dpi(win32.GetDpiForWindow(app.hwnd))
 	inside := point.x >= window_rect.left && point.x < window_rect.right &&
 		point.y >= window_rect.top && point.y < min(window_rect.top+bar_height, window_rect.bottom)
+	// Fullscreen reveals the bar after hovering the top edge for two seconds.
 	visible := !app.fullscreen || app.ui.menu_open
-	if app.fullscreen && !visible {
-		if inside {
-			if app.hover_started == {} {
-				app.hover_started = now
-			}
-			visible = time.duration_seconds(time.diff(app.hover_started, now)) >= 2.0
-		} else {
-			app.hover_started = {}
-		}
+	if !visible && inside {
+		if app.hover_started == {} do app.hover_started = now
+		visible = time.diff(app.hover_started, now) >= 2*time.Second
+	} else if !visible {
+		app.hover_started = {}
 	}
-	controls_changed := app.controls_visible != visible
+	changed |= app.controls_visible != visible
 	app.controls_visible = visible
-	ui_interaction_active := app.controls_visible && (inside || app.ui.menu_open)
-	if controls_changed || wake_changed || reconnect_changed || screenshot_changed || feedback_changed || ui_interaction_active do renderer_request_ui_redraw(&app.renderer)
+	if changed || (visible && (inside || app.ui.menu_open)) do renderer_request_ui_redraw(&app.renderer)
 
 	when ELGA_FULLSCREEN_STRESS do fullscreen_stress_tick()
 	when ELGA_FORMAT_STRESS do format_stress_tick()
@@ -416,8 +387,7 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 		app.always_on_top = !app.always_on_top
 		target := win32.HWND_TOPMOST if app.always_on_top else win32.HWND_NOTOPMOST
 		win32.SetWindowPos(app.hwnd, target, 0, 0, 0, 0, win32.SWP_NOMOVE | win32.SWP_NOSIZE | win32.SWP_NOACTIVATE)
-		window_layout_observe(&app.layout, app.hwnd, app.fullscreen, app.always_on_top)
-		window_layout_save(&app.layout)
+		save_window_layout(app.hwnd)
 	case .Audio:
 		audio_set_muted(&app.audio, !audio_is_muted(&app.audio))
 	case .Wake:
@@ -425,15 +395,13 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 	case .Screenshot:
 		if app.renderer.reconnect_thread == nil {
 			screenshot_request(&app.screenshot, &app.renderer)
-			app.screenshot_feedback_until = time.time_add(time.now(), 4*time.Second)
+			app.screenshot_feedback_until = time.time_add(time.now(), SCREENSHOT_FEEDBACK_DURATION)
 			renderer_request_redraw(&app.renderer)
 		}
 	case .Reconnect:
 		renderer_request_reconnect(&app.renderer)
 	case .EDID_Mode:
-		if value >= 0 && value <= int(EDID_Mode.Merged) {
-			renderer_request_edid_mode(&app.renderer, EDID_Mode(value))
-		}
+		if value >= 0 && value < len(EDID_Mode) do renderer_request_edid_mode(&app.renderer, EDID_Mode(value))
 	case .EDID_Refresh:
 		renderer_request_edid_refresh(&app.renderer)
 	case .Minimize:
@@ -442,74 +410,73 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 		if app.fullscreen {
 			toggle_fullscreen()
 		} else {
-			command := win32.SW_RESTORE if win32.IsZoomed(app.hwnd) else win32.SW_MAXIMIZE
-			win32.ShowWindow(app.hwnd, command)
+			win32.ShowWindow(app.hwnd, win32.SW_RESTORE if win32.IsZoomed(app.hwnd) else win32.SW_MAXIMIZE)
 		}
 	case .Close:
 		win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
 	case .Output:
+		// Zero selects the Windows default output.
 		audio_select_output(&app.audio, value-1)
 	case .ColorFormat:
+		// CAPTURE_FORMAT_COUNT selects Auto.
 		if value == CAPTURE_FORMAT_COUNT {
 			renderer_set_capture_format_auto(&app.renderer)
 		} else if value >= 0 && value < CAPTURE_FORMAT_COUNT {
 			renderer_set_capture_format(&app.renderer, Capture_Format(value))
 		}
 	case .Resolution:
+		// Width and height packed into one value; zero selects Auto.
 		packed := u64(value)
 		renderer_set_capture_resolution(&app.renderer, u32(packed>>32), u32(packed))
 	}
 }
 
+// Debug builds only (-define:ELGA_FULLSCREEN_STRESS=true): twelve transitions, then exit.
 fullscreen_stress_tick :: proc() {
-	when ELGA_FULLSCREEN_STRESS {
-		if fullscreen_stress_started == {} {
-			fullscreen_stress_started = time.now()
-			return
+	@(static) started: time.Time
+	@(static) step: int
+	if started == {} {
+		started = time.now()
+		return
+	}
+	target_step := min(int(time.duration_seconds(time.since(started))/0.5), 12)
+	for step < target_step {
+		toggle_fullscreen()
+		step += 1
+		fmt.eprintf("fullscreen stress transition %d/12\n", step)
+	}
+	if step >= 12 do win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
+}
+
+// Debug builds only (-define:ELGA_FORMAT_STRESS=true): cycles resolutions and formats, then exits.
+format_stress_tick :: proc() {
+	@(static) started: time.Time
+	@(static) step: int
+	if started == {} {
+		started = time.now()
+		return
+	}
+	r := &app.renderer
+	target_step := min(int(time.duration_seconds(time.since(started))/3.0), 8)
+	for step < target_step {
+		fmt.eprintf("mode stress state: %s %dx%d sequence=%d display=%.1f FPS\n", CAPTURE_FORMAT_NAME[r.capture_format], r.mode.width, r.mode.height, sync.atomic_load_explicit(&r.video_sequence, .Acquire), r.display_fps)
+		switch step {
+		case 0: renderer_set_capture_resolution(r, 1920, 1080)
+		case 1: renderer_set_capture_resolution(r, 1280, 720)
+		case 2: renderer_set_capture_resolution(r, 2560, 1440)
+		case 3: renderer_set_capture_resolution(r, 0, 0)
+		case 4: renderer_set_capture_format(r, .P010)
+		case 5: renderer_set_capture_format(r, .YUY2)
+		case 6: renderer_set_capture_format(r, .NV12)
+		case 7: win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
 		}
-		target_step := min(int(time.duration_seconds(time.since(fullscreen_stress_started))/0.5), 12)
-		for fullscreen_stress_step < target_step {
-			toggle_fullscreen()
-			fullscreen_stress_step += 1
-			fmt.eprintf("fullscreen stress transition %d/12\n", fullscreen_stress_step)
-		}
-		if fullscreen_stress_step >= 12 {
-			win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
-		}
+		step += 1
+		fmt.eprintf("mode stress transition %d/8\n", step)
 	}
 }
 
-format_stress_tick :: proc() {
-	when ELGA_FORMAT_STRESS {
-		if format_stress_started == {} {
-			format_stress_started = time.now()
-			return
-		}
-		target_step := min(int(time.duration_seconds(time.since(format_stress_started))/3.0), 8)
-		for format_stress_step < target_step {
-			fmt.eprintf("mode stress state: %s %dx%d sequence=%d display=%.1f FPS\n", capture_format_name(app.renderer.capture_format), app.renderer.capture_width, app.renderer.capture_height, sync.atomic_load_explicit(&app.renderer.video_sequence, .Acquire), app.renderer.display_fps)
-			switch format_stress_step {
-			case 0:
-				renderer_set_capture_resolution(&app.renderer, 1920, 1080)
-			case 1:
-				renderer_set_capture_resolution(&app.renderer, 1280, 720)
-			case 2:
-				renderer_set_capture_resolution(&app.renderer, 2560, 1440)
-			case 3:
-				renderer_set_capture_resolution(&app.renderer, 0, 0)
-			case 4:
-				renderer_set_capture_format(&app.renderer, .P010)
-			case 5:
-				renderer_set_capture_format(&app.renderer, .YUY2)
-			case 6:
-				renderer_set_capture_format(&app.renderer, .NV12)
-			case 7:
-				win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
-			}
-			format_stress_step += 1
-			fmt.eprintf("mode stress transition %d/8\n", format_stress_step)
-		}
-	}
+dpi_scale :: proc(dpi: u32) -> f32 {
+	return max(f32(dpi)/f32(win32.USER_DEFAULT_SCREEN_DPI), 1.0)
 }
 
 title_bar_height_for_dpi :: proc(dpi: u32) -> i32 {
@@ -518,24 +485,24 @@ title_bar_height_for_dpi :: proc(dpi: u32) -> i32 {
 	return (i32(TITLE_BAR_HEIGHT)*i32(max(dpi, win32.USER_DEFAULT_SCREEN_DPI)) + 95)/96
 }
 
-enforce_16_9 :: proc(rect: ^win32.RECT, edge: u32) {
-	enforce_16_9_for_dpi(rect, edge, win32.GetDpiForWindow(app.hwnd))
+// The default 1280x720 video area plus the title bar, in physical pixels.
+default_window_size :: proc(dpi: u32) -> (width, height: i32) {
+	width = DEFAULT_VIDEO_WIDTH*i32(dpi)/win32.USER_DEFAULT_SCREEN_DPI
+	height = (DEFAULT_VIDEO_WIDTH*ASPECT_DEN/ASPECT_NUM)*i32(dpi)/win32.USER_DEFAULT_SCREEN_DPI + title_bar_height_for_dpi(dpi)
+	return
 }
 
 enforce_16_9_for_dpi :: proc(rect: ^win32.RECT, edge, dpi: u32) {
 	if rect == nil do return
-	outer_w := rect.right - rect.left
-	outer_h := rect.bottom - rect.top
 	bar_height := title_bar_height_for_dpi(dpi)
 	minimum_width := MIN_CLIENT_W*i32(dpi)/i32(win32.USER_DEFAULT_SCREEN_DPI)
 	minimum_height := MIN_CLIENT_H*i32(dpi)/i32(win32.USER_DEFAULT_SCREEN_DPI)
-	client_w := max(outer_w, minimum_width)
-	client_h := max(outer_h-bar_height, minimum_height)
+	client_w := max(rect.right-rect.left, minimum_width)
+	client_h := max(rect.bottom-rect.top-bar_height, minimum_height)
 
 	// Vertical edges follow height; horizontal edges and corners follow width.
 	// Comparing aspect-ratio errors always favors width because 16/9 > 1.
-	width_led := edge != win32.WMSZ_TOP && edge != win32.WMSZ_BOTTOM
-	if width_led {
+	if edge != win32.WMSZ_TOP && edge != win32.WMSZ_BOTTOM {
 		client_h = max(client_w * ASPECT_DEN / ASPECT_NUM, minimum_height)
 	} else {
 		client_w = max(client_h * ASPECT_NUM / ASPECT_DEN, minimum_width)
@@ -566,45 +533,30 @@ toggle_fullscreen :: proc() {
 		if monitor == nil || !bool(win32.GetMonitorInfoW(monitor, &info)) do return
 		app.fullscreen = true
 		app.controls_visible = false
-		app.hover_started = {}
 		win32.SetWindowLongPtrW(app.hwnd, win32.GWL_STYLE, app.windowed_style & ~win32.LONG_PTR(win32.WS_OVERLAPPEDWINDOW))
 		target := win32.HWND_TOPMOST if app.always_on_top else win32.HWND_TOP
-		win32.SetWindowPos(app.hwnd, target, info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right-info.rcMonitor.left, info.rcMonitor.bottom-info.rcMonitor.top, win32.SWP_FRAMECHANGED | win32.SWP_NOOWNERZORDER)
-		set_window_frame_appearance(app.hwnd, true)
+		m := info.rcMonitor
+		win32.SetWindowPos(app.hwnd, target, m.left, m.top, m.right-m.left, m.bottom-m.top, win32.SWP_FRAMECHANGED | win32.SWP_NOOWNERZORDER)
 	} else {
 		app.fullscreen = false
 		app.controls_visible = true
-		app.hover_started = {}
 		win32.SetWindowLongPtrW(app.hwnd, win32.GWL_STYLE, app.windowed_style)
 		r := app.windowed_rect
 		win32.SetWindowPos(app.hwnd, nil, r.left, r.top, r.right-r.left, r.bottom-r.top, win32.SWP_FRAMECHANGED | win32.SWP_NOZORDER | win32.SWP_NOOWNERZORDER)
-		set_window_frame_appearance(app.hwnd, false)
 	}
+	app.hover_started = {}
+	set_window_frame_appearance(app.hwnd, app.fullscreen)
 	win32.SetCursor(win32.LoadCursorA(nil, win32.IDC_ARROW))
-		renderer_request_redraw(&app.renderer)
+	renderer_request_redraw(&app.renderer)
 }
 
 set_window_frame_appearance :: proc(hwnd: win32.HWND, fullscreen: bool) {
 	// Windows 11 renders the physical window shape and the one-pixel outline.
 	// Unsupported DWM attributes fail harmlessly on earlier Windows versions.
-	corner := win32.DWM_WINDOW_CORNER_PREFERENCE.ROUND
-	border_color := win32.COLORREF(0x00464646)
-	if fullscreen {
-		corner = .DONOTROUND
-		border_color = win32.COLORREF(0xffff_fffe) // DWMWA_COLOR_NONE
-	}
-	win32.DwmSetWindowAttribute(
-		hwnd,
-		win32.DWORD(win32.DWMWINDOWATTRIBUTE.DWMWA_WINDOW_CORNER_PREFERENCE),
-		&corner,
-		win32.DWORD(size_of(corner)),
-	)
-	win32.DwmSetWindowAttribute(
-		hwnd,
-		win32.DWORD(win32.DWMWINDOWATTRIBUTE.DWMWA_BORDER_COLOR),
-		&border_color,
-		win32.DWORD(size_of(border_color)),
-	)
+	corner := win32.DWM_WINDOW_CORNER_PREFERENCE.DONOTROUND if fullscreen else .ROUND
+	border_color := win32.COLORREF(0xffff_fffe if fullscreen else 0x00464646) // 0xfffffffe is DWMWA_COLOR_NONE
+	win32.DwmSetWindowAttribute(hwnd, win32.DWORD(win32.DWMWINDOWATTRIBUTE.DWMWA_WINDOW_CORNER_PREFERENCE), &corner, win32.DWORD(size_of(corner)))
+	win32.DwmSetWindowAttribute(hwnd, win32.DWORD(win32.DWMWINDOWATTRIBUTE.DWMWA_BORDER_COLOR), &border_color, win32.DWORD(size_of(border_color)))
 }
 
 fatal :: proc(message: string) {

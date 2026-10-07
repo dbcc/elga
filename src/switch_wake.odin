@@ -36,6 +36,23 @@ Wake_Error :: enum u32 {
 	Transfer,
 }
 
+@(rodata)
+WAKE_ERROR_REASON := [Wake_Error]cstring{
+	.None                = "transfer failed",
+	.Curl_Global_Init    = "libcurl initialization failed",
+	.Health_Monitor_Init = "health monitor could not start",
+	.Thread_Create       = "could not create worker thread",
+	.Curl_Easy_Init      = "could not create curl request",
+	.Curl_Setup          = "could not configure curl",
+	.Resolve             = "could not resolve switch2-waker.local",
+	.Connect             = "could not connect to beacon",
+	.Timeout             = "beacon timed out",
+	.Http                = "beacon returned HTTP %d",
+	.Cancelled           = "request was cancelled",
+	.Transfer            = "transfer failed",
+}
+
+// Status fields are written by the worker threads and read by the window thread.
 Wake_Control :: struct {
 	initialized:      bool,
 	request_thread:   ^thread.Thread,
@@ -55,31 +72,23 @@ Wake_Control :: struct {
 }
 
 wake_init :: proc(w: ^Wake_Control) -> bool {
-	sync.atomic_store_explicit(&w.online, 0, .Relaxed)
-	sync.atomic_store_explicit(&w.health_checked, 0, .Relaxed)
-	sync.atomic_store_explicit(&w.health_error, u32(Wake_Error.None), .Relaxed)
-	sync.atomic_store_explicit(&w.health_http_status, 0, .Relaxed)
+	init_error := Wake_Error.None
 	if curl.global_init(curl.GLOBAL_DEFAULT) != .E_OK {
-		fmt.eprintln("Switch wake: could not initialize libcurl")
-		wake_set_health(w, false, .Curl_Global_Init)
-		wake_set_result(w, .Unavailable, .Curl_Global_Init)
-		return false
+		init_error = .Curl_Global_Init
+	} else {
+		w.health_event = win32.CreateEventW(nil, false, false, nil)
+		if w.health_event != nil do w.health_thread = thread.create(wake_health_thread_proc, .Low, "switch-health")
+		if w.health_thread == nil {
+			if w.health_event != nil do win32.CloseHandle(w.health_event)
+			w.health_event = nil
+			curl.global_cleanup()
+			init_error = .Health_Monitor_Init
+		}
 	}
-	sync.atomic_store_explicit(&w.cancel_requested, 0, .Release)
-	w.health_event = win32.CreateEventW(nil, false, false, nil)
-	if w.health_event == nil {
-		curl.global_cleanup()
-		wake_set_health(w, false, .Health_Monitor_Init)
-		wake_set_result(w, .Unavailable, .Health_Monitor_Init)
-		return false
-	}
-	w.health_thread = thread.create(wake_health_thread_proc, .Low, "switch-health")
-	if w.health_thread == nil {
-		win32.CloseHandle(w.health_event)
-		w.health_event = nil
-		curl.global_cleanup()
-		wake_set_health(w, false, .Health_Monitor_Init)
-		wake_set_result(w, .Unavailable, .Health_Monitor_Init)
+	if init_error != .None {
+		fmt.eprintf("Switch wake: unavailable (%v)\n", init_error)
+		wake_set_health(w, false, init_error)
+		wake_set_result(w, .Unavailable, init_error)
 		return false
 	}
 	w.health_thread.data = w
@@ -92,15 +101,11 @@ wake_init :: proc(w: ^Wake_Control) -> bool {
 wake_destroy :: proc(w: ^Wake_Control) {
 	sync.atomic_store_explicit(&w.cancel_requested, 1, .Release)
 	if w.health_event != nil do win32.SetEvent(w.health_event)
-	if w.request_thread != nil {
-		thread.join(w.request_thread)
-		thread.destroy(w.request_thread)
-		w.request_thread = nil
-	}
-	if w.health_thread != nil {
-		thread.join(w.health_thread)
-		thread.destroy(w.health_thread)
-		w.health_thread = nil
+	for worker in ([2]^^thread.Thread{&w.request_thread, &w.health_thread}) {
+		if worker^ == nil do continue
+		thread.join(worker^)
+		thread.destroy(worker^)
+		worker^ = nil
 	}
 	if w.health_event != nil {
 		win32.CloseHandle(w.health_event)
@@ -114,6 +119,7 @@ wake_destroy :: proc(w: ^Wake_Control) {
 	w.result_visible_since = {}
 }
 
+// Window thread. Reports whether anything the UI shows has changed.
 wake_update :: proc(w: ^Wake_Control) -> bool {
 	changed := false
 	now := time.now()
@@ -124,9 +130,7 @@ wake_update :: proc(w: ^Wake_Control) -> bool {
 		w.result_visible_since = now
 		changed = true
 	}
-	if wake_expire_result(w, now) {
-		changed = true
-	}
+	if wake_expire_result(w, now) do changed = true
 	generation := sync.atomic_load_explicit(&w.generation, .Acquire)
 	changed = changed || generation != w.observed_generation
 	w.observed_generation = generation
@@ -173,24 +177,28 @@ wake_get_error :: proc(w: ^Wake_Control) -> Wake_Error {
 	return Wake_Error(sync.atomic_load_explicit(&w.error, .Acquire))
 }
 
-wake_get_http_status :: proc(w: ^Wake_Control) -> u32 {
-	return sync.atomic_load_explicit(&w.http_status, .Acquire)
-}
-
 wake_is_online :: proc(w: ^Wake_Control) -> bool {
 	return sync.atomic_load_explicit(&w.online, .Acquire) != 0
 }
 
-wake_health_was_checked :: proc(w: ^Wake_Control) -> bool {
-	return sync.atomic_load_explicit(&w.health_checked, .Acquire) != 0
-}
-
-wake_get_health_error :: proc(w: ^Wake_Control) -> Wake_Error {
-	return Wake_Error(sync.atomic_load_explicit(&w.health_error, .Acquire))
-}
-
-wake_get_health_http_status :: proc(w: ^Wake_Control) -> u32 {
-	return sync.atomic_load_explicit(&w.health_http_status, .Acquire)
+wake_tooltip :: proc(w: ^Wake_Control) -> cstring {
+	reason :: proc(error: Wake_Error, http_status: u32) -> cstring {
+		return fmt.ctprintf(string(WAKE_ERROR_REASON[error]), http_status) if error == .Http else WAKE_ERROR_REASON[error]
+	}
+	if !wake_is_online(w) {
+		if sync.atomic_load_explicit(&w.health_checked, .Acquire) == 0 do return "Checking Switch 2 wake beacon..."
+		error := Wake_Error(sync.atomic_load_explicit(&w.health_error, .Acquire))
+		return fmt.ctprintf("Wake unavailable: %s", reason(error, sync.atomic_load_explicit(&w.health_http_status, .Acquire)))
+	}
+	switch wake_get_status(w) {
+	case .Unavailable: return "Switch wake is unavailable"
+	case .Idle:        return "Wake Nintendo Switch 2"
+	case .Sending:     return "Sending Switch 2 wake request..."
+	case .Success:     return "Switch 2 wake request sent"
+	case .Failed:
+		return fmt.ctprintf("Switch wake failed: %s", reason(wake_get_error(w), sync.atomic_load_explicit(&w.http_status, .Acquire)))
+	}
+	return ""
 }
 
 wake_set_result :: proc(w: ^Wake_Control, status: Wake_Status, error: Wake_Error, http_status: u32 = 0) {
@@ -212,7 +220,7 @@ wake_health_thread_proc :: proc(t: ^thread.Thread) {
 	w := cast(^Wake_Control)t.data
 	if w == nil do return
 	for sync.atomic_load_explicit(&w.cancel_requested, .Acquire) == 0 {
-		online, error, http_status := wake_probe(w)
+		online, error, http_status := wake_http_request(w, SWITCH_WAKE_HEALTH_URL, false)
 		if sync.atomic_load_explicit(&w.cancel_requested, .Acquire) != 0 do break
 		wake_set_health(w, online, error, http_status)
 		wait_result := win32.WaitForSingleObject(w.health_event, SWITCH_WAKE_HEALTH_INTERVAL_MS)
@@ -224,16 +232,24 @@ wake_health_thread_proc :: proc(t: ^thread.Thread) {
 	}
 }
 
-wake_probe :: proc(w: ^Wake_Control) -> (online: bool, error: Wake_Error, http_status: u32) {
-	return wake_http_request(w, SWITCH_WAKE_HEALTH_URL, false)
+wake_request_thread_proc :: proc(t: ^thread.Thread) {
+	w := cast(^Wake_Control)t.data
+	if w == nil do return
+	ok, error, http_status := wake_http_request(w, SWITCH_WAKE_URL, true)
+	if ok {
+		fmt.eprintln("Switch wake: request sent")
+		wake_set_health(w, true, .None, http_status)
+	} else {
+		fmt.eprintf("Switch wake: request failed (%v, HTTP %d)\n", error, http_status)
+		if error != .Cancelled do wake_set_health(w, false, error, http_status)
+	}
+	wake_set_result(w, .Success if ok else .Failed, error, http_status)
 }
 
-// Both requests use identical timeouts, cancellation, and status handling.
+// Health probes and wake requests share timeouts, cancellation, and status handling.
 wake_http_request :: proc(w: ^Wake_Control, url: cstring, post: bool) -> (ok: bool, error: Wake_Error, http_status: u32) {
 	easy := curl.easy_init()
-	if easy == nil {
-		return false, .Curl_Easy_Init, 0
-	}
+	if easy == nil do return false, .Curl_Easy_Init, 0
 	defer curl.easy_cleanup(easy)
 
 	options_ok := curl.easy_setopt(easy, .URL, url) == .E_OK &&
@@ -249,34 +265,14 @@ wake_http_request :: proc(w: ^Wake_Control, url: cstring, post: bool) -> (ok: bo
 		options_ok = curl.easy_setopt(easy, .POST, c.long(1)) == .E_OK &&
 			curl.easy_setopt(easy, .POSTFIELDSIZE, c.long(0)) == .E_OK
 	}
-	if !options_ok {
-		return false, .Curl_Setup, 0
-	}
+	if !options_ok do return false, .Curl_Setup, 0
 
 	result := curl.easy_perform(easy)
 	response_code: c.long
 	info_result := curl.easy_getinfo(easy, .RESPONSE_CODE, &response_code)
 	if response_code > 0 do http_status = u32(response_code)
-	ok = result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300
-	if ok do return true, .None, http_status
+	if result == .E_OK && info_result == .E_OK && response_code >= 200 && response_code < 300 do return true, .None, http_status
 	return false, wake_classify_error(result, info_result), http_status
-}
-
-wake_request_thread_proc :: proc(t: ^thread.Thread) {
-	w := cast(^Wake_Control)t.data
-	if w == nil do return
-	succeeded, error, http_status := wake_http_request(w, SWITCH_WAKE_URL, true)
-	defer wake_set_result(w, .Success if succeeded else .Failed, .None if succeeded else error, http_status)
-	if !succeeded {
-		if error != .Cancelled do wake_set_health(w, false, error, http_status)
-	} else {
-		wake_set_health(w, true, .None, http_status)
-	}
-	if succeeded {
-		fmt.eprintln("Switch wake: request sent")
-	} else {
-		fmt.eprintf("Switch wake: request failed (%v, HTTP %d)\n", error, http_status)
-	}
 }
 
 wake_classify_error :: proc(result, info_result: curl.code) -> Wake_Error {

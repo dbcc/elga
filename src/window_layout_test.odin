@@ -96,9 +96,9 @@ window_layout_save_failure_retry_test :: proc(t: ^testing.T) {
 	directory, err := os.make_directory_temp("", "elga-layout-test-*", context.temp_allocator)
 	testing.expect(t, err == nil)
 	if err != nil do return
-	path, temp_path, paths_ok := window_layout_paths_for_directory(directory, 1001)
+	path, temp_path, paths_ok := settings_paths_for_directory(directory, WINDOW_LAYOUT_FILE, 1001)
 	testing.expect(t, paths_ok)
-	_, other_temp, other_ok := window_layout_paths_for_directory(directory, 1002)
+	_, other_temp, other_ok := settings_paths_for_directory(directory, WINDOW_LAYOUT_FILE, 1002)
 	testing.expect(t, other_ok && temp_path != other_temp)
 	audio_path, audio_error := filepath.join([]string{directory, AUDIO_SETTINGS_FILE}, context.temp_allocator)
 	testing.expect(t, audio_error == nil)

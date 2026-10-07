@@ -109,57 +109,39 @@ edid_windows_property_support :: proc(control: ^IKsControl, node_id, property_id
 		(support & (KS_PROPERTY_TYPE_GET | KS_PROPERTY_TYPE_SET)) == (KS_PROPERTY_TYPE_GET | KS_PROPERTY_TYPE_SET)
 }
 
+// Finds the extension unit node that speaks the EDID protocol. A node that
+// exposes the properties but fails validation is still returned, with its error.
 edid_windows_open :: proc(source: ^IMFMediaSource, r: ^Renderer) -> (EDID_Windows_Controller, EDID_Mode, EDID_Protocol_Error, bool) {
-	controller: EDID_Windows_Controller
-	if source == nil do return controller, .Internal, .Unsupported, false
+	if source == nil do return {}, .Internal, .Unsupported, false
 	topology: ^IKsTopologyInfo
-	if failed(source.QueryInterface(source, IID_IKsTopologyInfo, cast(^rawptr)&topology)) do return controller, .Internal, .Unsupported, false
+	if failed(source.QueryInterface(source, IID_IKsTopologyInfo, cast(^rawptr)&topology)) do return {}, .Internal, .Unsupported, false
 	defer com_release(topology)
-	controller.source = source
-	controller.renderer = r
 	node_count: u32
-	if failed(topology.GetNumNodes(topology, &node_count)) {
-		edid_windows_close(&controller)
-		return controller, .Internal, .Unsupported, false
-	}
-	fallback_found := false
-	fallback_node: u32
+	if failed(topology.GetNumNodes(topology, &node_count)) do return {}, .Internal, .Unsupported, false
+
+	fallback: Maybe(EDID_Windows_Controller)
 	fallback_error := EDID_Protocol_Error.Unsupported
 	for node_id in 0..<node_count {
 		control: ^IKsControl
 		if failed(topology.CreateNodeInstance(topology, node_id, IID_IKsControl, cast(^rawptr)&control)) do continue
-		if edid_windows_property_support(control, node_id, EDID_PROPERTY_LENGTH) &&
-		   edid_windows_property_support(control, node_id, EDID_PROPERTY_DATA) {
-			// Validation uses the same fresh-control-per-transfer behavior as all
-			// later requests; the instance used for support probing is not reused.
-			com_release(control)
-			controller.node_id = node_id
-			transport := edid_windows_transport(&controller)
-			mode, protocol_error := edid_read_mode(&transport)
-			if protocol_error == .None {
-				return controller, mode, .None, true
-			}
-			fmt.eprintf("EDID protocol validation failed: node=%d error=%s\n", node_id, edid_protocol_error_text(protocol_error))
-			if !fallback_found {
-				fallback_found = true
-				fallback_node = node_id
-				fallback_error = protocol_error
-			}
-			continue
-		}
+		supported := edid_windows_property_support(control, node_id, EDID_PROPERTY_LENGTH) &&
+			edid_windows_property_support(control, node_id, EDID_PROPERTY_DATA)
+		// Validation uses the same fresh-control-per-transfer behavior as all
+		// later requests; the instance used for support probing is not reused.
 		com_release(control)
+		if !supported do continue
+		controller := EDID_Windows_Controller{source = source, node_id = node_id, renderer = r}
+		transport := edid_windows_transport(&controller)
+		mode, protocol_error := edid_read_mode(&transport)
+		if protocol_error == .None do return controller, mode, .None, true
+		fmt.eprintf("EDID protocol validation failed: node=%d error=%s\n", node_id, EDID_ERROR_TEXT[protocol_error])
+		if fallback == nil {
+			fallback = controller
+			fallback_error = protocol_error
+		}
 	}
-	if fallback_found {
-		controller.node_id = fallback_node
-		return controller, .Internal, fallback_error, true
-	}
-	edid_windows_close(&controller)
-	return controller, .Internal, .Unsupported, false
-}
-
-edid_windows_close :: proc(controller: ^EDID_Windows_Controller) {
-	if controller == nil do return
-	controller^ = {}
+	if controller, found := fallback.?; found do return controller, .Internal, fallback_error, true
+	return {}, .Internal, .Unsupported, false
 }
 
 edid_windows_transport :: proc(controller: ^EDID_Windows_Controller) -> EDID_Transport {

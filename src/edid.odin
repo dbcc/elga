@@ -45,27 +45,40 @@ EDID_Protocol_Error :: enum u32 {
 	Device_Rejected,
 }
 
-edid_protocol_error_text :: proc(error: EDID_Protocol_Error) -> cstring {
-	switch error {
-	case .None:                       return "none"
-	case .Cancelled:                  return "operation cancelled"
-	case .Unsupported:                return "extension unavailable"
-	case .Transfer_Failed:            return "device transfer failed"
-	case .Invalid_Transfer_Count:     return "invalid device transfer count"
-	case .Response_Timeout:           return "device response timed out"
-	case .Response_Too_Large:         return "device response was too large"
-	case .Unexpected_Response_Length: return "unexpected device response length"
-	case .Protocol_Version:           return "unsupported protocol version"
-	case .Unknown_Mode:               return "card returned an unknown mode"
-	case .Length_Write_Failed:         return "request-length write failed"
-	case .Write_Failed:                return "request-data write failed"
-	case .Readback_Failed:             return "mode readback failed"
-	case .Readback_Mismatch:           return "mode readback did not match"
-	case .Response_Header:            return "unexpected device response header"
-	case .Response_Checksum:          return "device response checksum failed"
-	case .Device_Rejected:            return "device rejected the request"
-	}
-	return "unknown EDID error"
+@(rodata)
+EDID_ERROR_TEXT := [EDID_Protocol_Error]cstring{
+	.None                       = "none",
+	.Cancelled                  = "operation cancelled",
+	.Unsupported                = "extension unavailable",
+	.Transfer_Failed            = "device transfer failed",
+	.Invalid_Transfer_Count     = "invalid device transfer count",
+	.Response_Timeout           = "device response timed out",
+	.Response_Too_Large         = "device response was too large",
+	.Unexpected_Response_Length = "unexpected device response length",
+	.Protocol_Version           = "unsupported protocol version",
+	.Unknown_Mode               = "card returned an unknown mode",
+	.Length_Write_Failed        = "request-length write failed",
+	.Write_Failed               = "request-data write failed",
+	.Readback_Failed            = "mode readback failed",
+	.Readback_Mismatch          = "mode readback did not match",
+	.Response_Header            = "unexpected device response header",
+	.Response_Checksum          = "device response checksum failed",
+	.Device_Rejected            = "device rejected the request",
+}
+
+@(rodata)
+EDID_MODE_NAME := [EDID_Mode]cstring{
+	.Internal = "Internal",
+	.Display  = "Display",
+	.Merged   = "Merged (recommended)",
+}
+
+// The card's protocol values for each mode.
+@(rodata)
+EDID_MODE_DEVICE_VALUE := [EDID_Mode]u8{
+	.Internal = 0,
+	.Display  = 1,
+	.Merged   = 4,
 }
 
 EDID_Set_Disposition :: enum u32 {
@@ -119,31 +132,11 @@ EDID_DEFAULT_POLL_LIMIT       :: u32(100)
 EDID_DEFAULT_POLL_DELAY       :: 10*time.Millisecond
 EDID_READ_ATTEMPTS            :: 3
 
-edid_mode_device_value :: proc(mode: EDID_Mode) -> (u32, bool) {
-	switch mode {
-	case .Internal: return 0, true
-	case .Display:  return 1, true
-	case .Merged:   return 4, true
-	}
-	return 0, false
-}
-
 edid_mode_from_device :: proc(value: u8) -> (EDID_Mode, bool) {
-	switch value {
-	case 0: return .Internal, true
-	case 1: return .Display, true
-	case 4: return .Merged, true
+	for device_value, mode in EDID_MODE_DEVICE_VALUE {
+		if device_value == value do return mode, true
 	}
 	return .Internal, false
-}
-
-edid_mode_name :: proc(mode: EDID_Mode) -> cstring {
-	switch mode {
-	case .Internal: return "Internal"
-	case .Display:  return "Display"
-	case .Merged:   return "Merged (recommended)"
-	}
-	return "Unknown"
 }
 
 edid_transport_cancelled :: proc(transport: ^EDID_Transport) -> bool {
@@ -302,9 +295,8 @@ edid_set_mode :: proc(transport: ^EDID_Transport, requested: EDID_Mode) -> (EDID
 	current, error := edid_read_mode(transport)
 	if error != .None do return .Internal, false, .Not_Applied, error
 	if current == requested do return current, true, .Not_Applied, .None
-	device_value, valid := edid_mode_device_value(requested)
-	if !valid do return current, true, .Not_Applied, .Unknown_Mode
-	payload := [4]u8{u8(device_value), u8(device_value>>8), u8(device_value>>16), u8(device_value>>24)}
+	// The little-endian u32 mode value.
+	payload := [4]u8{EDID_MODE_DEVICE_VALUE[requested], 0, 0, 0}
 	response: [4]u8
 	error = edid_command(transport, EDID_COMMAND_SET_MODE, payload[:], response[:])
 	if error == .Length_Write_Failed do return current, true, .Not_Applied, error

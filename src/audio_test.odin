@@ -100,9 +100,9 @@ audio_volume_settings_test :: proc(t: ^testing.T) {
 	temp_directory, temp_error := os.make_directory_temp("", "elga-audio-test-*", context.temp_allocator)
 	testing.expect(t, temp_error == nil)
 	if temp_error != nil do return
-	settings_path, temp_path, paths_ok := audio_settings_paths_for_directory(temp_directory, 1001)
+	settings_path, temp_path, paths_ok := settings_paths_for_directory(temp_directory, AUDIO_SETTINGS_FILE, 1001)
 	testing.expect(t, paths_ok)
-	_, second_temp_path, second_paths_ok := audio_settings_paths_for_directory(temp_directory, 1002)
+	_, second_temp_path, second_paths_ok := settings_paths_for_directory(temp_directory, AUDIO_SETTINGS_FILE, 1002)
 	testing.expect(t, second_paths_ok)
 	testing.expect(t, temp_path != second_temp_path)
 	blocker_path, blocker_path_error := filepath.join([]string{temp_directory, "not-a-directory"}, context.temp_allocator)

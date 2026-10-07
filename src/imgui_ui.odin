@@ -18,15 +18,16 @@ AUDIO_VOLUME_HOVER_DELAY :: 0.30
 AUDIO_VOLUME_LEAVE_DELAY :: 0.25
 AUDIO_VOLUME_FLYOUT_WIDTH :: 220.0
 
+UI_TEXT_COLOR    :: imgui.Vec4{0.82, 0.84, 0.87, 1}
+UI_SURFACE_COLOR :: imgui.Vec4{0.018, 0.018, 0.018, 1}
+UI_HOVER_COLOR   :: imgui.Vec4{0.13, 0.13, 0.13, 1}
+UI_ACTIVE_COLOR  :: imgui.Vec4{0.20, 0.20, 0.20, 1}
+
 Control_Icon :: enum {
 	Fullscreen,
-	Pin,
-	Topmost,
 	Audio,
 	Muted,
 	Wake,
-	Color,
-	Mode,
 	Settings,
 	Minimize,
 	Maximize,
@@ -68,7 +69,7 @@ imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
 	io := imgui.GetIO()
 	io.IniFilename = nil
 	io.LogFilename = nil
-	ui.dpi_scale = max(f32(win32.GetDpiForWindow(r.hwnd))/f32(win32.USER_DEFAULT_SCREEN_DPI), 1.0)
+	ui.dpi_scale = dpi_scale(win32.GetDpiForWindow(r.hwnd))
 	ui.font_size = UI_FONT_SIZE*ui.dpi_scale
 	ui.font = imgui.FontAtlas_AddFontDefaultVector(io.Fonts)
 	if ui.font == nil {
@@ -88,8 +89,8 @@ imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
 	style.ItemSpacing = {TITLE_BAR_ITEM_SPACING, 6}
 	style.Colors[imgui.Col.PopupBg] = {0.035, 0.035, 0.035, 1}
 	style.Colors[imgui.Col.Border] = {0.18, 0.18, 0.18, 1}
-	style.Colors[imgui.Col.HeaderHovered] = {0.13, 0.13, 0.13, 1}
-	style.Colors[imgui.Col.HeaderActive] = {0.20, 0.20, 0.20, 1}
+	style.Colors[imgui.Col.HeaderHovered] = UI_HOVER_COLOR
+	style.Colors[imgui.Col.HeaderActive] = UI_ACTIVE_COLOR
 	style.Colors[imgui.Col.CheckMark] = {0.74, 0.76, 0.78, 1}
 	imgui.Style_ScaleAllSizes(style, ui.dpi_scale)
 
@@ -111,7 +112,7 @@ imgui_ui_destroy :: proc(ui: ^ImGui_State) {
 }
 
 imgui_ui_set_dpi :: proc(ui: ^ImGui_State, dpi: u32) {
-	new_scale := max(f32(dpi)/f32(win32.USER_DEFAULT_SCREEN_DPI), 1.0)
+	new_scale := dpi_scale(dpi)
 	old_scale := max(ui.dpi_scale, 1.0)
 	if abs(new_scale-old_scale) < 0.001 do return
 	ui.dpi_scale = new_scale
@@ -157,115 +158,110 @@ title_bar_wake_start :: proc(client_width, dpi_scale: f32) -> f32 {
 	return client_width - (3*TITLE_BAR_BUTTON_WIDTH + UI_ICON_BUTTON_SIZE + TITLE_BAR_ITEM_SPACING)*dpi_scale
 }
 
+audio_flyout_close :: proc(ui: ^ImGui_State) {
+	ui.audio_volume_open = false
+	ui.audio_hover_started = 0
+	ui.audio_leave_started = 0
+}
+
 imgui_build_overlay :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	ui.menu_open = false
-	if app.controls_visible {
-		s := ui.dpi_scale
-		audio_button_hovered := false
-		audio_output_menu_open := false
-		audio_button_min, audio_button_max: imgui.Vec2
-		imgui.PushStyleVar(.WindowRounding, 0)
-		imgui.PushStyleVar(.FrameRounding, 0)
-		imgui.PushStyleColorImVec4(.WindowBg, {0.018, 0.018, 0.018, 1})
-		imgui.PushStyleColorImVec4(.Button, {0, 0, 0, 0})
-		imgui.PushStyleColorImVec4(.ButtonHovered, {0.13, 0.13, 0.13, 1})
-		imgui.PushStyleColorImVec4(.ButtonActive, {0.20, 0.20, 0.20, 1})
-		imgui.PushStyleColorImVec4(.Text, {0.82, 0.84, 0.87, 1})
-		imgui.SetNextWindowPos({0, 0}, .Always)
-		imgui.SetNextWindowSize({f32(r.width), TITLE_BAR_HEIGHT*s}, .Always)
-		imgui.SetNextWindowBgAlpha(1)
-		imgui.Begin("##custom_title_bar", nil, TITLE_BAR_WINDOW_FLAGS)
-		title_draw := imgui.GetWindowDrawList()
-		outline := imgui.ColorConvertFloat4ToU32({0.14, 0.14, 0.14, 1})
-		imgui.DrawList_AddLine(title_draw, {0, TITLE_BAR_HEIGHT*s-0.5*s}, {f32(r.width), TITLE_BAR_HEIGHT*s-0.5*s}, outline, 1*s)
+	if !app.controls_visible {
+		audio_flyout_close(ui)
+		return
+	}
+	s := ui.dpi_scale
+	imgui.PushStyleVar(.WindowRounding, 0)
+	imgui.PushStyleVar(.FrameRounding, 0)
+	imgui.PushStyleColorImVec4(.WindowBg, UI_SURFACE_COLOR)
+	imgui.PushStyleColorImVec4(.Button, {0, 0, 0, 0})
+	imgui.PushStyleColorImVec4(.ButtonHovered, UI_HOVER_COLOR)
+	imgui.PushStyleColorImVec4(.ButtonActive, UI_ACTIVE_COLOR)
+	imgui.PushStyleColorImVec4(.Text, UI_TEXT_COLOR)
+	imgui.SetNextWindowPos({0, 0}, .Always)
+	imgui.SetNextWindowSize({f32(r.width), TITLE_BAR_HEIGHT*s}, .Always)
+	imgui.SetNextWindowBgAlpha(1)
+	imgui.Begin("##custom_title_bar", nil, TITLE_BAR_WINDOW_FLAGS)
+	title_draw := imgui.GetWindowDrawList()
+	outline := imgui.ColorConvertFloat4ToU32({0.14, 0.14, 0.14, 1})
+	imgui.DrawList_AddLine(title_draw, {0, TITLE_BAR_HEIGHT*s-0.5*s}, {f32(r.width), TITLE_BAR_HEIGHT*s-0.5*s}, outline, 1*s)
 
-		imgui.SetCursorPos({10*s, 6*s})
-		imgui.AlignTextToFramePadding()
-		imgui.TextUnformatted("ELGA")
-		imgui.SetCursorPos({TITLE_BAR_DRAG_WIDTH*s, 7*s})
-		if icon_button(ui, "##fullscreen", .Fullscreen) do post_ui_action(.Fullscreen)
-		imgui.SetItemTooltipUnformatted("Exit fullscreen (F)" if app.fullscreen else "Fullscreen (F)")
-		imgui.SameLine()
-		muted := audio_is_muted(&app.audio)
-		if icon_button(ui, "##audio", .Muted if muted else .Audio, muted) do post_ui_action(.Audio)
-		audio_button_hovered = imgui.IsItemHovered()
-		audio_button_min = imgui.GetItemRectMin()
-		audio_button_max = imgui.GetItemRectMax()
-		now := imgui.GetTime()
-		if audio_button_hovered {
-			ui.audio_leave_started = 0
-			if !ui.audio_volume_open {
-				if ui.audio_hover_started == 0 do ui.audio_hover_started = now
-				if now-ui.audio_hover_started >= AUDIO_VOLUME_HOVER_DELAY do ui.audio_volume_open = true
-			}
-		} else if !ui.audio_volume_open {
-			ui.audio_hover_started = 0
-		}
-		if !ui.audio_volume_open {
-			imgui.SetItemTooltipUnformatted("Left-click: mute. Right-click: select output device")
-		}
-		if imgui.BeginPopupContextItem("audio_outputs", imgui.PopupFlags_MouseButtonRight) {
-			ui.menu_open = true
-			audio_output_menu_open = true
-			ui.audio_volume_open = false
-			ui.audio_hover_started = 0
-			ui.audio_leave_started = 0
-			if imgui.Selectable("Windows default output", app.audio.selected_output < 0) {
-				post_ui_action(.Output, 0)
-			}
-			for i in 0..<app.audio.output_count {
-				name := cstring(&app.audio.outputs[i].name[0])
-				if imgui.Selectable(name, app.audio.selected_output == i) {
-					post_ui_action(.Output, i+1)
-				}
-			}
-			imgui.EndPopup()
-		}
-		imgui.SameLine()
-		if icon_button(ui, "##settings", .Settings) {
-			ui.audio_volume_open = false
-			ui.audio_hover_started = 0
-			imgui.OpenPopup("settings")
-		}
-		imgui.SetItemTooltipUnformatted("Settings")
-		imgui_build_settings(ui, r)
+	imgui.SetCursorPos({10*s, 6*s})
+	imgui.AlignTextToFramePadding()
+	imgui.TextUnformatted("ELGA")
+	imgui.SetCursorPos({TITLE_BAR_DRAG_WIDTH*s, 7*s})
+	if icon_button(ui, "##fullscreen", .Fullscreen) do post_ui_action(.Fullscreen)
+	imgui.SetItemTooltipUnformatted("Exit fullscreen (F)" if app.fullscreen else "Fullscreen (F)")
+	imgui.SameLine()
 
-		// Keep the standard window commands fixed to the right edge, independent
-		// of which capture controls or status text fit in the middle.
-		button_x := f32(r.width) - 3*TITLE_BAR_BUTTON_WIDTH*s
-		wake_x := title_bar_wake_start(f32(r.width), s)
-		imgui_draw_capture_status(ui, r, title_draw, title_bar_controls_end(s)+16*s, wake_x-14*s)
-		imgui.SetCursorPos({wake_x, 7*s})
-		wake_status := wake_get_status(&app.wake)
-		wake_online := wake_is_online(&app.wake)
-		wake_disabled := !wake_online || wake_status == .Sending || wake_request_in_flight(&app.wake)
-		imgui.BeginDisabled(wake_disabled)
-		if icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success) do post_ui_action(.Wake)
-		imgui.EndDisabled()
-		if imgui.IsItemHovered(imgui.HoveredFlags_ForTooltip | imgui.HoveredFlags_AllowWhenDisabled) {
-			wake_set_tooltip(&app.wake, wake_status, wake_online)
-		}
-		imgui.SetCursorPos({button_x, 0})
-		if title_bar_button(ui, "##minimize", .Minimize) do post_ui_action(.Minimize)
-		imgui.SetItemTooltipUnformatted("Minimize")
-		imgui.SameLine(0, 0)
-		maximized := app.fullscreen || win32.IsZoomed(app.hwnd)
-		if title_bar_button(ui, "##maximize", .Restore if maximized else .Maximize) do post_ui_action(.Maximize)
-		imgui.SetItemTooltipUnformatted("Restore" if maximized else "Maximize")
-		imgui.SameLine(0, 0)
-		if title_bar_button(ui, "##close", .Close) do post_ui_action(.Close)
-		imgui.SetItemTooltipUnformatted("Close")
-		imgui.End()
-		imgui.PopStyleColor(5)
-		imgui.PopStyleVar(2)
-
-		if ui.audio_volume_open && !audio_output_menu_open {
-			audio_volume_flyout(ui, audio_button_min, audio_button_max, audio_button_hovered)
-		}
-	} else {
-		ui.audio_volume_open = false
-		ui.audio_hover_started = 0
+	muted := audio_is_muted(&app.audio)
+	if icon_button(ui, "##audio", .Muted if muted else .Audio, muted) do post_ui_action(.Audio)
+	audio_button_hovered := imgui.IsItemHovered()
+	audio_button_min, audio_button_max := imgui.GetItemRectMin(), imgui.GetItemRectMax()
+	now := imgui.GetTime()
+	if audio_button_hovered {
 		ui.audio_leave_started = 0
+		if !ui.audio_volume_open {
+			if ui.audio_hover_started == 0 do ui.audio_hover_started = now
+			if now-ui.audio_hover_started >= AUDIO_VOLUME_HOVER_DELAY do ui.audio_volume_open = true
+		}
+	} else if !ui.audio_volume_open {
+		ui.audio_hover_started = 0
+	}
+	if !ui.audio_volume_open {
+		imgui.SetItemTooltipUnformatted("Left-click: mute. Right-click: select output device")
+	}
+	audio_output_menu_open := imgui.BeginPopupContextItem("audio_outputs", imgui.PopupFlags_MouseButtonRight)
+	if audio_output_menu_open {
+		ui.menu_open = true
+		audio_flyout_close(ui)
+		if imgui.Selectable("Windows default output", app.audio.selected_output < 0) {
+			post_ui_action(.Output, 0)
+		}
+		for i in 0..<app.audio.output_count {
+			if imgui.Selectable(cstring(&app.audio.outputs[i].name[0]), app.audio.selected_output == i) {
+				post_ui_action(.Output, i+1)
+			}
+		}
+		imgui.EndPopup()
+	}
+	imgui.SameLine()
+	if icon_button(ui, "##settings", .Settings) {
+		audio_flyout_close(ui)
+		imgui.OpenPopup("settings")
+	}
+	imgui.SetItemTooltipUnformatted("Settings")
+	imgui_build_settings(ui, r)
+
+	// Keep the standard window commands fixed to the right edge, independent
+	// of which capture controls or status text fit in the middle.
+	button_x := f32(r.width) - 3*TITLE_BAR_BUTTON_WIDTH*s
+	wake_x := title_bar_wake_start(f32(r.width), s)
+	imgui_draw_capture_status(ui, r, title_draw, title_bar_controls_end(s)+16*s, wake_x-14*s)
+	imgui.SetCursorPos({wake_x, 7*s})
+	wake_status := wake_get_status(&app.wake)
+	imgui.BeginDisabled(!wake_is_online(&app.wake) || wake_status == .Sending || wake_request_in_flight(&app.wake))
+	if icon_button(ui, "##wake_switch", .Wake, wake_status == .Sending || wake_status == .Success) do post_ui_action(.Wake)
+	imgui.EndDisabled()
+	if imgui.IsItemHovered(imgui.HoveredFlags_ForTooltip | imgui.HoveredFlags_AllowWhenDisabled) {
+		imgui.SetTooltipUnformatted(wake_tooltip(&app.wake))
+	}
+	imgui.SetCursorPos({button_x, 0})
+	if title_bar_button(ui, "##minimize", .Minimize) do post_ui_action(.Minimize)
+	imgui.SetItemTooltipUnformatted("Minimize")
+	imgui.SameLine(0, 0)
+	maximized := app.fullscreen || win32.IsZoomed(app.hwnd)
+	if title_bar_button(ui, "##maximize", .Restore if maximized else .Maximize) do post_ui_action(.Maximize)
+	imgui.SetItemTooltipUnformatted("Restore" if maximized else "Maximize")
+	imgui.SameLine(0, 0)
+	if title_bar_button(ui, "##close", .Close) do post_ui_action(.Close)
+	imgui.SetItemTooltipUnformatted("Close")
+	imgui.End()
+	imgui.PopStyleColor(5)
+	imgui.PopStyleVar(2)
+
+	if ui.audio_volume_open && !audio_output_menu_open {
+		audio_volume_flyout(ui, audio_button_min, audio_button_max, audio_button_hovered)
 	}
 }
 
@@ -289,15 +285,13 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui.EndMenu()
 	}
 	edid_open := imgui.BeginMenu("Input EDID mode")
-	edid_item_tooltip(ui, "Change how your capture device and display share video settings. The connected 4K X is the source of truth.")
+	ui_item_tooltip(ui, "Change how your capture device and display share video settings. The connected 4K X is the source of truth.")
 	if edid_open {
 		if !ui.edid_menu_open do post_ui_action(.EDID_Refresh)
-		ui.edid_menu_open = true
 		imgui_build_edid_menu(ui, r)
 		imgui.EndMenu()
-	} else {
-		ui.edid_menu_open = false
 	}
+	ui.edid_menu_open = edid_open
 	imgui.Separator()
 	imgui.BeginDisabled(!can_configure)
 	if imgui.BeginMenu("Resolution") {
@@ -310,11 +304,9 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 			mode := capture_mode_at(r, i)
 			if mode.width == last_width && mode.height == last_height do continue
 			last_width, last_height = mode.width, mode.height
-			label := fmt.ctprintf("%dx%d", mode.width, mode.height)
 			selected := r.requested_width == mode.width && r.requested_height == mode.height
-			if imgui.MenuItem(label, nil, selected) {
-				packed := int(u64(mode.width)<<32 | u64(mode.height))
-				post_ui_action(.Resolution, packed)
+			if imgui.MenuItem(fmt.ctprintf("%dx%d", mode.width, mode.height), nil, selected) {
+				post_ui_action(.Resolution, int(u64(mode.width)<<32 | u64(mode.height)))
 			}
 		}
 		imgui.EndMenu()
@@ -323,11 +315,10 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		if imgui.MenuItem("Auto - match native mode", nil, r.format_auto) {
 			post_ui_action(.ColorFormat, CAPTURE_FORMAT_COUNT)
 		}
-		for raw_format in 0..<CAPTURE_FORMAT_COUNT {
-			format := Capture_Format(raw_format)
+		for format in Capture_Format {
 			if !capture_format_available(r, format) do continue
-			if imgui.MenuItem(capture_format_menu_label(format), nil, !r.format_auto && r.capture_format == format) {
-				post_ui_action(.ColorFormat, raw_format)
+			if imgui.MenuItem(CAPTURE_FORMAT_MENU_LABEL[format], nil, !r.format_auto && r.capture_format == format) {
+				post_ui_action(.ColorFormat, int(format))
 			}
 		}
 		imgui.EndMenu()
@@ -340,7 +331,7 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	}
 }
 
-edid_item_tooltip :: proc(ui: ^ImGui_State, text: cstring) {
+ui_item_tooltip :: proc(ui: ^ImGui_State, text: cstring) {
 	if !imgui.IsItemHovered(imgui.HoveredFlags_ForTooltip | imgui.HoveredFlags_AllowWhenDisabled) do return
 	imgui.SetNextWindowSize({320*ui.dpi_scale, 0}, .Always)
 	if imgui.BeginTooltip() {
@@ -353,26 +344,30 @@ imgui_build_edid_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	status := EDID_Availability(sync.atomic_load_explicit(&r.edid_status, .Acquire))
 	known := sync.atomic_load_explicit(&r.edid_mode_known, .Acquire) != 0
 	current := EDID_Mode(sync.atomic_load_explicit(&r.edid_mode, .Relaxed))
-	can_select := status == .Ready && !renderer_edid_busy(r) &&
-		sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
+	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 
-	imgui.BeginDisabled(!can_select)
-	if imgui.MenuItem("Merged (recommended)", nil, known && current == .Merged) do post_ui_action(.EDID_Mode, int(EDID_Mode.Merged))
-	edid_item_tooltip(ui, "Automatically selects the best settings for both your capture device and display.")
-	if imgui.MenuItem("Display", nil, known && current == .Display) do post_ui_action(.EDID_Mode, int(EDID_Mode.Display))
-	edid_item_tooltip(ui, "Uses your TV or monitor's settings, ignoring your capture device.")
-	if imgui.MenuItem("Internal", nil, known && current == .Internal) do post_ui_action(.EDID_Mode, int(EDID_Mode.Internal))
-	edid_item_tooltip(ui, "Uses the EDID already stored on the card, ignoring your TV or monitor.")
+	Option :: struct {mode: EDID_Mode, tooltip: cstring}
+	options := [?]Option{
+		{.Merged,   "Automatically selects the best settings for both your capture device and display."},
+		{.Display,  "Uses your TV or monitor's settings, ignoring your capture device."},
+		{.Internal, "Uses the EDID already stored on the card, ignoring your TV or monitor."},
+	}
+	imgui.BeginDisabled(status != .Ready || renderer_edid_busy(r) || !capture_ready)
+	for option in options {
+		if imgui.MenuItem(EDID_MODE_NAME[option.mode], nil, known && current == option.mode) do post_ui_action(.EDID_Mode, int(option.mode))
+		ui_item_tooltip(ui, option.tooltip)
+	}
 	imgui.EndDisabled()
 
 	imgui.Separator()
-	refresh_enabled := r.capture_event != nil && !r.capture_suspended && r.reconnect_thread == nil &&
-		sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 && !renderer_edid_busy(r)
+	refresh_enabled := r.capture_event != nil && !r.capture_suspended && r.reconnect_thread == nil && capture_ready && !renderer_edid_busy(r)
 	if imgui.MenuItem("Refresh mode", nil, false, refresh_enabled) do post_ui_action(.EDID_Refresh)
 	imgui.TextDisabledUnformatted(edid_status_text(r, status, known, current))
 }
 
 edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, mode: EDID_Mode) -> cstring {
+	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_error, .Relaxed))
+	notice := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_notice, .Relaxed))
 	switch status {
 	case .Reading: return "Reading mode..."
 	case .Applying: return "Applying mode..."
@@ -380,18 +375,14 @@ edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, m
 	case .Unknown: return "Mode unknown - refresh required"
 	case .Applied_Capture_Unavailable: return "Mode applied; capture unavailable"
 	case .Unavailable:
-		error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_error, .Relaxed))
 		if error == .Unsupported do return "EDID extension unavailable for this device"
 		if error == .Protocol_Version do return "Unsupported 4K X EDID protocol"
-		return fmt.ctprintf("EDID verification failed: %s", edid_protocol_error_text(error))
-	case .Error:
-		error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_error, .Relaxed))
-		if error == .Readback_Mismatch && known do return fmt.ctprintf("Card reports %s; requested mode did not match", edid_mode_name(mode))
-		return fmt.ctprintf("Mode read failed: %s", edid_protocol_error_text(error))
-	case .Ready:
-		notice := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_notice, .Relaxed))
-		if notice == .Readback_Mismatch && known do return fmt.ctprintf("Card reports %s; requested mode did not match", edid_mode_name(mode))
-		if known do return fmt.ctprintf("Current: %s", edid_mode_name(mode))
+		return fmt.ctprintf("EDID verification failed: %s", EDID_ERROR_TEXT[error])
+	case .Error, .Ready:
+		mismatch := (error if status == .Error else notice) == .Readback_Mismatch
+		if mismatch && known do return fmt.ctprintf("Card reports %s; requested mode did not match", EDID_MODE_NAME[mode])
+		if status == .Error do return fmt.ctprintf("Mode read failed: %s", EDID_ERROR_TEXT[error])
+		if known do return fmt.ctprintf("Current: %s", EDID_MODE_NAME[mode])
 	}
 	return "EDID control unavailable"
 }
@@ -409,8 +400,10 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 		imgui.TextUnformatted("Connecting...")
 	} else {
 		imgui.TextUnformatted("Waiting for frames" if !h.has_samples || h.capture_stalled else "Frames arriving")
-		capture_fps := f64(r.capture_fps_num)/f64(max(r.capture_fps_den, u32(1)))
-		imgui.TextDisabledUnformatted(fmt.ctprintf("%dx%d @ %.1f FPS / %s", r.capture_width, r.capture_height, capture_fps, capture_format_selection_ui_name(r)))
+		capture_fps := f64(r.mode.fps_num)/f64(max(r.mode.fps_den, u32(1)))
+		format := CAPTURE_FORMAT_NAME[r.capture_format]
+		format_label := fmt.ctprintf("Auto (%s)", format) if r.format_auto else format
+		imgui.TextDisabledUnformatted(fmt.ctprintf("%dx%d @ %.1f FPS / %s", r.mode.width, r.mode.height, capture_fps, format_label))
 	}
 	if r.reconnect_error do imgui.TextUnformatted("Reconnect could not start; try again")
 	imgui.Separator()
@@ -434,15 +427,14 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 	imgui.TextUnformatted("Recent stalls")
 	if h.stall_count == 0 do imgui.TextDisabledUnformatted("None recorded")
 	for i in 0..<min(h.stall_count, 5) {
-		index := (h.stall_next-1-i+len(h.stalls))%len(h.stalls)
-		stall := h.stalls[index]
+		stall := h.stalls[(h.stall_next-1-i+len(h.stalls))%len(h.stalls)]
 		kind := "Capture" if stall.kind == .Capture else "Display"
 		imgui.TextUnformatted(fmt.ctprintf("%s: %.0f ms%s", kind, stall.duration_ms, " (ongoing)" if stall.ongoing else ""))
 	}
 }
 
 imgui_build_capture_feedback :: proc(ui: ^ImGui_State, r: ^Renderer) {
-	if !screenshot_busy(&app.screenshot) && time.diff(time.now(), app.screenshot_feedback_until) <= 0 do return
+	if !screenshot_feedback_visible() do return
 	s := ui.dpi_scale
 	imgui.SetNextWindowPos({16*s, max(50*s, f32(r.height)-64*s)}, .Always)
 	imgui.SetNextWindowSize({min(420*s, f32(r.width)-32*s), 0}, .Always)
@@ -458,24 +450,29 @@ imgui_draw_capture_status :: proc(ui: ^ImGui_State, r: ^Renderer, draw: ^imgui.D
 	if right-left < 18*s do return
 	capture_ready := r.reconnect_thread == nil && sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 	capture_running := sync.atomic_load_explicit(&r.capture_running, .Acquire)
-	status_color := imgui.ColorConvertFloat4ToU32({0.38, 0.65, 0.48, 1})
+	status_color := imgui.Vec4{0.38, 0.65, 0.48, 1}
 	label: cstring = "Capture unavailable"
+	short_label: cstring = "Unavailable"
 	if capture_ready {
-		label = fmt.ctprintf("%dx%d  /  %.1f FPS", r.capture_width, r.capture_height, r.display_fps) if app.fps_visible else fmt.ctprintf("%dx%d", r.capture_width, r.capture_height)
+		short_label = fmt.ctprintf("%dx%d", r.mode.width, r.mode.height)
+		label = fmt.ctprintf("%dx%d  /  %.1f FPS", r.mode.width, r.mode.height, r.display_fps) if app.fps_visible else short_label
+	} else if capture_running {
+		status_color = {0.75, 0.58, 0.31, 1}
+		label = "Reconnecting..." if r.reconnect_thread != nil else "Connecting..."
+		short_label = "Connecting"
 	} else {
-		status_color = imgui.ColorConvertFloat4ToU32({0.75, 0.58, 0.31, 1}) if capture_running else imgui.ColorConvertFloat4ToU32({0.63, 0.34, 0.34, 1})
-		if capture_running do label = "Connecting..."
+		status_color = {0.63, 0.34, 0.34, 1}
 		if r.reconnect_thread != nil do label = "Reconnecting..."
 	}
 	text_left := left+13*s
 	text_size := imgui.CalcTextSize(label)
 	if text_size.x > right-text_left {
-		label = fmt.ctprintf("%dx%d", r.capture_width, r.capture_height) if capture_ready else "Connecting" if capture_running else "Unavailable"
+		label = short_label
 		text_size = imgui.CalcTextSize(label)
 	}
 	// Status shares the drag region, but never the window command buttons.
 	imgui.DrawList_PushClipRect(draw, {left, 0}, {right, TITLE_BAR_HEIGHT*s}, true)
-	imgui.DrawList_AddCircleFilled(draw, {left+3*s, TITLE_BAR_HEIGHT*s*0.5}, 2.5*s, status_color, 12)
+	imgui.DrawList_AddCircleFilled(draw, {left+3*s, TITLE_BAR_HEIGHT*s*0.5}, 2.5*s, imgui.ColorConvertFloat4ToU32(status_color), 12)
 	if text_size.x <= right-text_left {
 		imgui.DrawList_AddText(draw, {text_left, (TITLE_BAR_HEIGHT*s-text_size.y)*0.5}, imgui.ColorConvertFloat4ToU32({0.52, 0.54, 0.56, 1}), label)
 	}
@@ -485,22 +482,21 @@ imgui_draw_capture_status :: proc(ui: ^ImGui_State, r: ^Renderer, draw: ^imgui.D
 audio_volume_flyout :: proc(ui: ^ImGui_State, button_min, button_max: imgui.Vec2, button_hovered: bool) {
 	s := ui.dpi_scale
 	ui.menu_open = true
-	height := f32(76)*s
-	if audio_settings_save_failed(&app.audio) do height = 112*s
+	save_failed := audio_settings_save_failed(&app.audio)
 	imgui.PushStyleVar(.WindowRounding, 0)
 	imgui.PushStyleVar(.WindowBorderSize, 1*s)
 	imgui.PushStyleVar(.FrameRounding, 0)
 	imgui.PushStyleVar(.GrabRounding, 0)
-	imgui.PushStyleColorImVec4(.WindowBg, {0.018, 0.018, 0.018, 1})
+	imgui.PushStyleColorImVec4(.WindowBg, UI_SURFACE_COLOR)
 	imgui.PushStyleColorImVec4(.Border, {0.28, 0.29, 0.31, 1})
-	imgui.PushStyleColorImVec4(.Text, {0.82, 0.84, 0.87, 1})
+	imgui.PushStyleColorImVec4(.Text, UI_TEXT_COLOR)
 	imgui.PushStyleColorImVec4(.FrameBg, {0.07, 0.07, 0.07, 1})
-	imgui.PushStyleColorImVec4(.FrameBgHovered, {0.13, 0.13, 0.13, 1})
-	imgui.PushStyleColorImVec4(.FrameBgActive, {0.20, 0.20, 0.20, 1})
+	imgui.PushStyleColorImVec4(.FrameBgHovered, UI_HOVER_COLOR)
+	imgui.PushStyleColorImVec4(.FrameBgActive, UI_ACTIVE_COLOR)
 	imgui.PushStyleColorImVec4(.SliderGrab, {0.58, 0.60, 0.63, 1})
-	imgui.PushStyleColorImVec4(.SliderGrabActive, {0.82, 0.84, 0.87, 1})
+	imgui.PushStyleColorImVec4(.SliderGrabActive, UI_TEXT_COLOR)
 	imgui.SetNextWindowPos({button_min.x, button_max.y+4*s}, .Always)
-	imgui.SetNextWindowSize({AUDIO_VOLUME_FLYOUT_WIDTH*s, height}, .Always)
+	imgui.SetNextWindowSize({AUDIO_VOLUME_FLYOUT_WIDTH*s, f32(112 if save_failed else 76)*s}, .Always)
 	imgui.Begin("##audio_volume_flyout", nil, AUDIO_VOLUME_WINDOW_FLAGS)
 	imgui.TextUnformatted("Volume")
 	imgui.SetNextItemWidth(-1)
@@ -510,9 +506,7 @@ audio_volume_flyout :: proc(ui: ^ImGui_State, button_min, button_max: imgui.Vec2
 	}
 	slider_active := imgui.IsItemActive()
 	if imgui.IsItemDeactivatedAfterEdit() do audio_save_settings(&app.audio)
-	if audio_settings_save_failed(&app.audio) {
-		imgui.TextWrappedUnformatted("Volume could not be saved beside Elga")
-	}
+	if save_failed do imgui.TextWrappedUnformatted("Volume could not be saved beside Elga")
 	flyout_hovered := imgui.IsWindowHovered()
 	imgui.End()
 	imgui.PopStyleColor(8)
@@ -524,51 +518,7 @@ audio_volume_flyout :: proc(ui: ^ImGui_State, button_min, button_max: imgui.Vec2
 		return
 	}
 	if ui.audio_leave_started == 0 do ui.audio_leave_started = now
-	if now-ui.audio_leave_started >= AUDIO_VOLUME_LEAVE_DELAY {
-		ui.audio_volume_open = false
-		ui.audio_hover_started = 0
-		ui.audio_leave_started = 0
-	}
-}
-
-wake_set_tooltip :: proc(w: ^Wake_Control, status: Wake_Status, online: bool) {
-	if !online {
-		if !wake_health_was_checked(w) {
-			imgui.SetTooltipUnformatted("Checking Switch 2 wake beacon...")
-			return
-		}
-		switch wake_get_health_error(w) {
-		case .Resolve:        imgui.SetTooltipUnformatted("Wake unavailable: could not resolve switch2-waker.local")
-		case .Connect:        imgui.SetTooltipUnformatted("Wake unavailable: beacon is offline")
-		case .Timeout:        imgui.SetTooltipUnformatted("Wake unavailable: beacon timed out")
-		case .Http:           imgui.SetTooltip("Wake unavailable: beacon returned HTTP %u", wake_get_health_http_status(w))
-		case .Curl_Global_Init: imgui.SetTooltipUnformatted("Wake unavailable: libcurl initialization failed")
-		case .Health_Monitor_Init: imgui.SetTooltipUnformatted("Wake unavailable: health monitor could not start")
-		case .Curl_Easy_Init, .Curl_Setup, .Thread_Create, .Cancelled, .Transfer, .None:
-			imgui.SetTooltipUnformatted("Wake unavailable: beacon health check failed")
-		}
-		return
-	}
-
-	switch status {
-	case .Unavailable: imgui.SetTooltipUnformatted("Switch wake is unavailable")
-	case .Idle:        imgui.SetTooltipUnformatted("Wake Nintendo Switch 2")
-	case .Sending:     imgui.SetTooltipUnformatted("Sending Switch 2 wake request...")
-	case .Success:     imgui.SetTooltipUnformatted("Switch 2 wake request sent")
-	case .Failed:
-		switch wake_get_error(w) {
-		case .Thread_Create:  imgui.SetTooltipUnformatted("Switch wake failed: could not create worker thread")
-		case .Curl_Easy_Init: imgui.SetTooltipUnformatted("Switch wake failed: could not create curl request")
-		case .Curl_Setup:     imgui.SetTooltipUnformatted("Switch wake failed: could not configure curl")
-		case .Resolve:        imgui.SetTooltipUnformatted("Switch wake failed: could not resolve switch2-waker.local")
-		case .Connect:        imgui.SetTooltipUnformatted("Switch wake failed: beacon refused the connection")
-		case .Timeout:        imgui.SetTooltipUnformatted("Switch wake failed: beacon timed out")
-		case .Http:           imgui.SetTooltip("Switch wake failed: beacon returned HTTP %u", wake_get_http_status(w))
-		case .Cancelled:      imgui.SetTooltipUnformatted("Switch wake request was cancelled")
-		case .None, .Curl_Global_Init, .Health_Monitor_Init, .Transfer:
-			imgui.SetTooltipUnformatted("Switch wake failed during transfer")
-		}
-	}
+	if now-ui.audio_leave_started >= AUDIO_VOLUME_LEAVE_DELAY do audio_flyout_close(ui)
 }
 
 icon_button :: proc(ui: ^ImGui_State, id: cstring, icon: Control_Icon, active := false) -> bool {
@@ -576,9 +526,8 @@ icon_button :: proc(ui: ^ImGui_State, id: cstring, icon: Control_Icon, active :=
 	imgui.PushStyleVar(.FrameRounding, 5*ui.dpi_scale)
 	clicked := imgui.Button(id, {size, size})
 	imgui.PopStyleVar()
-	icon_min, icon_max := imgui.GetItemRectMin(), imgui.GetItemRectMax()
 	color := imgui.GetColorU32(.CheckMark if active else .Text)
-	draw_control_icon(imgui.GetWindowDrawList(), icon, icon_min, icon_max, color, ui.dpi_scale*UI_ICON_SCALE)
+	draw_control_icon(imgui.GetWindowDrawList(), icon, imgui.GetItemRectMin(), imgui.GetItemRectMax(), color, ui.dpi_scale*UI_ICON_SCALE)
 	return clicked
 }
 
@@ -599,30 +548,15 @@ draw_control_icon :: proc(draw: ^imgui.DrawList, icon: Control_Icon, min, max: i
 	stroke := 1.75*s
 	switch icon {
 	case .Fullscreen:
-		left, right := c.x-9*s, c.x+9*s
-		top, bottom := c.y-9*s, c.y+9*s
+		// Four corner brackets.
 		leg := 6*s
-		imgui.DrawList_AddLine(draw, {left, top+leg}, {left, top}, color, stroke)
-		imgui.DrawList_AddLine(draw, {left, top}, {left+leg, top}, color, stroke)
-		imgui.DrawList_AddLine(draw, {right-leg, top}, {right, top}, color, stroke)
-		imgui.DrawList_AddLine(draw, {right, top}, {right, top+leg}, color, stroke)
-		imgui.DrawList_AddLine(draw, {left, bottom-leg}, {left, bottom}, color, stroke)
-		imgui.DrawList_AddLine(draw, {left, bottom}, {left+leg, bottom}, color, stroke)
-		imgui.DrawList_AddLine(draw, {right-leg, bottom}, {right, bottom}, color, stroke)
-		imgui.DrawList_AddLine(draw, {right, bottom}, {right, bottom-leg}, color, stroke)
-	case .Pin:
-		imgui.DrawList_AddLine(draw, {c.x-7*s, c.y-7*s}, {c.x+7*s, c.y-7*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x-5*s, c.y-7*s}, {c.x-4*s, c.y-1*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x+5*s, c.y-7*s}, {c.x+4*s, c.y-1*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x-7*s, c.y-1*s}, {c.x+7*s, c.y-1*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x-4*s, c.y-1*s}, {c.x, c.y+3*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x+4*s, c.y-1*s}, {c.x, c.y+3*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x, c.y+3*s}, {c.x, c.y+10*s}, color, stroke)
-	case .Topmost:
-		imgui.DrawList_AddRect(draw, {c.x-9*s, c.y-3*s}, {c.x+9*s, c.y+9*s}, color, 1.5*s, stroke)
-		imgui.DrawList_AddLine(draw, {c.x, c.y+4*s}, {c.x, c.y-9*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x, c.y-9*s}, {c.x-5*s, c.y-4*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x, c.y-9*s}, {c.x+5*s, c.y-4*s}, color, stroke)
+		for x in ([2]f32{-1, 1}) {
+			for y in ([2]f32{-1, 1}) {
+				corner := imgui.Vec2{c.x+x*9*s, c.y+y*9*s}
+				imgui.DrawList_AddLine(draw, corner, {corner.x-x*leg, corner.y}, color, stroke)
+				imgui.DrawList_AddLine(draw, corner, {corner.x, corner.y-y*leg}, color, stroke)
+			}
+		}
 	case .Audio, .Muted:
 		imgui.DrawList_PathLineTo(draw, {c.x-10*s, c.y-4*s})
 		imgui.DrawList_PathLineTo(draw, {c.x-5*s, c.y-4*s})
@@ -644,17 +578,6 @@ draw_control_icon :: proc(draw: ^imgui.DrawList, icon: Control_Icon, min, max: i
 		imgui.DrawList_PathArcTo(draw, c, 9*s, -0.75, 3.89, 20)
 		imgui.DrawList_PathStroke(draw, color, stroke)
 		imgui.DrawList_AddLine(draw, {c.x, c.y-11*s}, {c.x, c.y-1*s}, color, stroke)
-	case .Color:
-		red := imgui.ColorConvertFloat4ToU32({0.95, 0.30, 0.27, 1})
-		green := imgui.ColorConvertFloat4ToU32({0.30, 0.85, 0.48, 1})
-		blue := imgui.ColorConvertFloat4ToU32({0.30, 0.58, 1.00, 1})
-		imgui.DrawList_AddCircleFilled(draw, {c.x, c.y-5*s}, 5.5*s, red, 16)
-		imgui.DrawList_AddCircleFilled(draw, {c.x-5*s, c.y+4*s}, 5.5*s, green, 16)
-		imgui.DrawList_AddCircleFilled(draw, {c.x+5*s, c.y+4*s}, 5.5*s, blue, 16)
-	case .Mode:
-		imgui.DrawList_AddRect(draw, {c.x-11*s, c.y-8*s}, {c.x+11*s, c.y+7*s}, color, 2*s, stroke)
-		imgui.DrawList_AddLine(draw, {c.x-5*s, c.y+11*s}, {c.x+5*s, c.y+11*s}, color, stroke)
-		imgui.DrawList_AddLine(draw, {c.x, c.y+7*s}, {c.x, c.y+11*s}, color, stroke)
 	case .Settings:
 		for i in 0..<3 {
 			offset := f32(i-1)*7
@@ -673,30 +596,17 @@ draw_control_icon :: proc(draw: ^imgui.DrawList, icon: Control_Icon, min, max: i
 	}
 }
 
-capture_format_selection_ui_name :: proc(r: ^Renderer) -> cstring {
-	if !r.format_auto do return capture_format_name(r.capture_format)
-	switch r.capture_format {
-	case .NV12: return "Auto (NV12)"
-	case .P010: return "Auto (P010)"
-	case .YUY2: return "Auto (YUY2)"
-	case .I420: return "Auto (I420)"
-	case .RGB24: return "Auto (RGB24)"
-	case .MJPEG: return "Auto (MJPEG)"
-	}
-	return "Auto"
-}
-
 imgui_ui_process_message :: proc(ui: ^ImGui_State, hwnd: win32.HWND, msg: win32.UINT, wparam: win32.WPARAM, lparam: win32.LPARAM) {
 	if !ui.ready do return
-	if msg == win32.WM_SETFOCUS || msg == win32.WM_KILLFOCUS {
+	switch msg {
+	case win32.WM_SETFOCUS, win32.WM_KILLFOCUS:
 		// Hidden and minimized overlays do not run NewFrame. Keep only the
 		// latest focus state instead of allocating an event for every alt-tab.
 		ui.focus_dirty = true
 		ui.focused = msg == win32.WM_SETFOCUS
 		ui.focus_lost = ui.focus_lost || !ui.focused
 		return
-	}
-	if msg == win32.WM_MOUSEMOVE {
+	case win32.WM_MOUSEMOVE:
 		ui.mouse_pos = {f32(win32.GET_X_LPARAM(lparam)), f32(win32.GET_Y_LPARAM(lparam))}
 		ui.mouse_dirty = true
 		if !ui.mouse_tracking {
@@ -707,7 +617,7 @@ imgui_ui_process_message :: proc(ui: ^ImGui_State, hwnd: win32.HWND, msg: win32.
 			}
 			ui.mouse_tracking = bool(win32.TrackMouseEvent(&tracking))
 		}
-	} else if msg == win32.WM_MOUSELEAVE {
+	case win32.WM_MOUSELEAVE:
 		ui.mouse_pos = {-1, -1}
 		ui.mouse_dirty = true
 		ui.mouse_tracking = false
@@ -716,31 +626,32 @@ imgui_ui_process_message :: proc(ui: ^ImGui_State, hwnd: win32.HWND, msg: win32.
 	// Mouse movement is retained separately for the next visible frame.
 	if !app.controls_visible && !ui.menu_open do return
 	io := imgui.GetIO()
+	button: i32
+	down: bool
 	switch msg {
-	case win32.WM_LBUTTONDOWN, win32.WM_LBUTTONDBLCLK:
-		imgui_ui_queue_mouse_button(ui, io, 0, true, lparam)
-		win32.SetCapture(hwnd)
-	case win32.WM_LBUTTONUP:
-		imgui_ui_queue_mouse_button(ui, io, 0, false, lparam)
-		win32.ReleaseCapture()
-	case win32.WM_RBUTTONDOWN, win32.WM_RBUTTONDBLCLK:
-		imgui_ui_queue_mouse_button(ui, io, 1, true, lparam)
-		win32.SetCapture(hwnd)
-	case win32.WM_RBUTTONUP:
-		imgui_ui_queue_mouse_button(ui, io, 1, false, lparam)
-		win32.ReleaseCapture()
-	case win32.WM_MBUTTONDOWN, win32.WM_MBUTTONDBLCLK:
-		imgui_ui_queue_mouse_button(ui, io, 2, true, lparam)
-		win32.SetCapture(hwnd)
-	case win32.WM_MBUTTONUP:
-		imgui_ui_queue_mouse_button(ui, io, 2, false, lparam)
-		win32.ReleaseCapture()
-	case win32.WM_MOUSEWHEEL:
+	case win32.WM_LBUTTONDOWN, win32.WM_LBUTTONDBLCLK: button, down = 0, true
+	case win32.WM_RBUTTONDOWN, win32.WM_RBUTTONDBLCLK: button, down = 1, true
+	case win32.WM_MBUTTONDOWN, win32.WM_MBUTTONDBLCLK: button, down = 2, true
+	case win32.WM_LBUTTONUP: button = 0
+	case win32.WM_RBUTTONUP: button = 1
+	case win32.WM_MBUTTONUP: button = 2
+	case win32.WM_MOUSEWHEEL, win32.WM_MOUSEHWHEEL:
 		imgui_ui_flush_mouse_position(ui, io)
-		imgui.IO_AddMouseWheelEvent(io, 0, f32(win32.GET_WHEEL_DELTA_WPARAM(wparam))/f32(win32.WHEEL_DELTA))
-	case win32.WM_MOUSEHWHEEL:
-		imgui_ui_flush_mouse_position(ui, io)
-		imgui.IO_AddMouseWheelEvent(io, f32(win32.GET_WHEEL_DELTA_WPARAM(wparam))/f32(win32.WHEEL_DELTA), 0)
+		delta := f32(win32.GET_WHEEL_DELTA_WPARAM(wparam))/f32(win32.WHEEL_DELTA)
+		if msg == win32.WM_MOUSEWHEEL {
+			imgui.IO_AddMouseWheelEvent(io, 0, delta)
+		} else {
+			imgui.IO_AddMouseWheelEvent(io, delta, 0)
+		}
+		return
+	case:
+		return
+	}
+	imgui_ui_queue_mouse_button(ui, io, button, down, lparam)
+	if down {
+		win32.SetCapture(hwnd)
+	} else {
+		win32.ReleaseCapture()
 	}
 }
 
