@@ -10,6 +10,14 @@ import imgui "../vendor/odin-imgui"
 test_imgui_mutex: sync.Mutex
 
 @(test)
+imgui_bindings_match_compiled_library_test :: proc(t: ^testing.T) {
+	// Regenerated bindings must agree with the vendored static library on the
+	// version and on the layout of every struct shared across the boundary.
+	testing.expect_value(t, imgui.GetVersion(), cstring(imgui.VERSION))
+	testing.expect(t, imgui.DebugCheckVersionAndDataLayout(imgui.VERSION, size_of(imgui.IO), size_of(imgui.Style), size_of(imgui.Vec2), size_of(imgui.Vec4), size_of(imgui.DrawVert), size_of(imgui.DrawIdx)))
+}
+
+@(test)
 imgui_focus_events_remain_bounded_without_rendering_test :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_imgui_mutex)
 	defer sync.mutex_unlock(&test_imgui_mutex)

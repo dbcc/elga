@@ -115,6 +115,11 @@ Notable changes to Elga Camera are documented here. The project follows
 - If the enhancement worker cannot start, a disabled effect now shows Off
   instead of Paused.
 - The recorded Odin revision is now `dev-2026-10-nightly:84bc3fc`.
+- Dear ImGui updated from 1.92.8 to 1.92.9b. The vendored bindings were
+  regenerated and the static library rebuilt from source; build provenance and
+  local binding changes are recorded in `THIRD_PARTY_NOTICES.md`, which now
+  credits the correct odin-imgui project. Startup and a unit test verify that
+  the bindings match the library's version and struct layout.
 - Switch wake tooltips share one wording table for health and request errors.
 - The EDID menu reports the extension as unavailable, instead of
   "verification failed: none", when the capture source cannot be opened.

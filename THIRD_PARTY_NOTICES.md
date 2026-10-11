@@ -14,10 +14,22 @@ SDKs or grant redistribution rights. See `docs/VIDEO_ENHANCEMENTS.md` for status
 ## odin-imgui and Dear ImGui
 
 The repository vendors generated Odin bindings and a Windows static library
-from [odin-imgui](https://github.com/Capati/odin-imgui). The library includes
-[Dear ImGui](https://github.com/ocornut/imgui). Both are distributed under MIT
-license terms. The vendored license text is available at
+from [odin-imgui](https://gitlab.com/L-4/odin-imgui) by Trevin Sorenson. The
+library includes [Dear ImGui](https://github.com/ocornut/imgui). Both are
+distributed under MIT license terms. The vendored license text is available at
 [`vendor/odin-imgui/LICENSE`](vendor/odin-imgui/LICENSE).
+
+The vendored copy is odin-imgui commit `a116eb1` with `imgui_version` set to
+`v1.92.9b-docking`. Its C bindings come from the dear_bindings release
+`DearBindings_v0.21_ImGui_v1.92.9b-docking`. `build.py` built
+`imgui_windows_x64.lib` with its default backend set using MSVC `cl`
+19.51.36260 (Visual Studio 18, toolset 14.51), the toolset Odin links against.
+Two local changes differ from upstream: `gen_odin.py` uses dear_bindings'
+evaluated value for enum expressions that start with C's `~`, and
+`imgui_impl_wgpu` reads `CmdLists.Size` in place of the removed
+`CmdListsCount`. The `wasm/` objects were not rebuilt and remain at Dear ImGui
+1.92.8; this Windows viewer does not use them. The `imgui_impl_webgl` binding
+already failed to compile upstream and is unchanged.
 
 ## miniaudio
 

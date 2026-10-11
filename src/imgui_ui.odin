@@ -65,6 +65,8 @@ ImGui_State :: struct {
 }
 
 imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
+	// Stops on a mismatch between the vendored bindings and the static library.
+	imgui.CHECKVERSION()
 	imgui.CreateContext()
 	io := imgui.GetIO()
 	io.IniFilename = nil
