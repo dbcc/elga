@@ -105,6 +105,16 @@ Notable changes to Elga Camera are documented here. The project follows
   files, INI parsing, and device-name matching; capture selection is one
   `Capture_Config` value; the capture thread's EDID and recovery paths are
   split into small procedures. Unused title-bar icons were removed.
+- Internal cleanup: window chrome and sizing moved out of `main.odin` into
+  `window.odin`, and debug stress harnesses into `stress.odin`. EDID state
+  shared with the capture thread is one documented `EDID_Channel`. Video
+  enhancement preferences reuse the shared settings and INI helpers; the
+  enhancement state receives its audio stream explicitly instead of through
+  the global app. The frame-rate toggle uses the same deferred UI action as
+  every other menu item.
+- If the enhancement worker cannot start, a disabled effect now shows Off
+  instead of Paused.
+- The recorded Odin revision is now `dev-2026-10-nightly:84bc3fc`.
 - Switch wake tooltips share one wording table for health and request errors.
 - The EDID menu reports the extension as unavailable, instead of
   "verification failed: none", when the capture source cannot be opened.

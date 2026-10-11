@@ -326,18 +326,18 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	}
 	if imgui.BeginMenu("Color format") {
 		if imgui.MenuItem("Auto - match native mode", nil, r.format_auto) {
-			post_ui_action(.ColorFormat, CAPTURE_FORMAT_COUNT)
+			post_ui_action(.Color_Format, CAPTURE_FORMAT_COUNT)
 		}
 		for format in Capture_Format {
 			if !capture_format_available(r, format) do continue
 			if imgui.MenuItem(CAPTURE_FORMAT_MENU_LABEL[format], nil, !r.format_auto && r.capture_format == format) {
-				post_ui_action(.ColorFormat, int(format))
+				post_ui_action(.Color_Format, int(format))
 			}
 		}
 		imgui.EndMenu()
 	}
 	imgui.EndDisabled()
-	if imgui.MenuItem("Show frame rate", "P", app.fps_visible) do app.fps_visible = !app.fps_visible
+	if imgui.MenuItem("Show frame rate", "P", app.fps_visible) do post_ui_action(.FPS_Visible)
 	if app.layout.save_failed {
 		imgui.Separator()
 		imgui.TextDisabledUnformatted("Window layout could not be saved")

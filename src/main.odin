@@ -28,9 +28,10 @@ UI_Action :: enum u32 {
 	Maximize,
 	Close,
 	Output,
-	ColorFormat,
+	Color_Format,
 	Resolution,
 	Screenshot,
+	FPS_Visible,
 	Reconnect,
 	EDID_Mode,
 	EDID_Refresh,
@@ -232,6 +233,9 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 			app.screenshot_feedback_until = time.time_add(time.now(), SCREENSHOT_FEEDBACK_DURATION)
 			renderer_request_redraw(&app.renderer)
 		}
+	case .FPS_Visible:
+		app.fps_visible = !app.fps_visible
+		renderer_request_redraw(&app.renderer)
 	case .Reconnect:
 		renderer_request_reconnect(&app.renderer)
 	case .EDID_Mode:
@@ -257,7 +261,7 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 	case .Output:
 		// Zero selects the Windows default output.
 		audio_select_output(&app.audio, value-1)
-	case .ColorFormat:
+	case .Color_Format:
 		// CAPTURE_FORMAT_COUNT selects Auto.
 		if value == CAPTURE_FORMAT_COUNT {
 			renderer_set_capture_format_auto(&app.renderer)

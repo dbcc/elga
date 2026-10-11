@@ -128,8 +128,7 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		case u32('F'), win32.VK_F11:
 			toggle_fullscreen()
 		case u32('P'):
-			app.fps_visible = !app.fps_visible
-			renderer_request_redraw(&app.renderer)
+			apply_ui_action(.FPS_Visible, 0)
 		case win32.VK_F8:
 			post_ui_action(.Screenshot)
 		}
