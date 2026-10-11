@@ -41,22 +41,7 @@ Renderer :: struct {
 	reconnect_thread: ^thread.Thread,
 	reconnect_done: u32,
 	reconnect_error: bool,
-	edid_status: u32,
-	edid_error: u32,
-	edid_mode: u32,
-	edid_mode_known: u32,
-	edid_request_kind: u32,
-	edid_request_id: u32,
-	edid_request_generation: u32,
-	edid_requested_mode: u32,
-	edid_operation_active: u32,
-	edid_result_pending: u32,
-	edid_result_id: u32,
-	edid_result_generation: u32,
-	edid_result_disposition: u32,
-	edid_restore_pending: u32,
-	edid_notice: u32,
-	edid_verification_required: u32,
+	edid: EDID_Channel,
 	device_11:      ^d3d11.IDevice,
 	context_11:     ^d3d11.IDeviceContext,
 	capture_device_11:  ^d3d11.IDevice,
@@ -154,7 +139,7 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 	r.height = max(height, 1)
 	r.capture_format = .NV12
 	r.format_auto = true
-	sync.atomic_store_explicit(&r.edid_status, u32(EDID_Availability.Unavailable), .Relaxed)
+	sync.atomic_store_explicit(&r.edid.status, u32(EDID_Availability.Unavailable), .Relaxed)
 	sync.atomic_store_explicit(&r.capture_formats, u32(1)<<u32(Capture_Format.NV12), .Relaxed)
 
 	factory: ^dxgi.IFactory4

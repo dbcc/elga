@@ -354,9 +354,9 @@ ui_item_tooltip :: proc(ui: ^ImGui_State, text: cstring) {
 }
 
 imgui_build_edid_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
-	status := EDID_Availability(sync.atomic_load_explicit(&r.edid_status, .Acquire))
-	known := sync.atomic_load_explicit(&r.edid_mode_known, .Acquire) != 0
-	current := EDID_Mode(sync.atomic_load_explicit(&r.edid_mode, .Relaxed))
+	status := EDID_Availability(sync.atomic_load_explicit(&r.edid.status, .Acquire))
+	known := sync.atomic_load_explicit(&r.edid.mode_known, .Acquire) != 0
+	current := EDID_Mode(sync.atomic_load_explicit(&r.edid.mode, .Relaxed))
 	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 
 	Option :: struct {mode: EDID_Mode, tooltip: cstring}
@@ -379,8 +379,8 @@ imgui_build_edid_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
 }
 
 edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, mode: EDID_Mode) -> cstring {
-	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_error, .Relaxed))
-	notice := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid_notice, .Relaxed))
+	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.error, .Relaxed))
+	notice := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.notice, .Relaxed))
 	switch status {
 	case .Reading: return "Reading mode..."
 	case .Applying: return "Applying mode..."

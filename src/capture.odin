@@ -114,7 +114,7 @@ source_reader_on_read_sample :: proc "system" (this: ^IMFSourceReaderCallback, s
 	r := callback.renderer
 	if r == nil || !sync.atomic_load_explicit(&r.capture_running, .Acquire) do return win32.HRESULT(win32.S_OK)
 	if failed(status) {
-		if sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) == 0 {
+		if sync.atomic_load_explicit(&r.edid.operation_active, .Acquire) == 0 {
 			sync.atomic_add_explicit(&r.health.source_errors, 1, .Relaxed)
 			capture_request_refresh(r)
 		}
@@ -166,7 +166,7 @@ capture_flush :: proc(r: ^Renderer, callback: ^Source_Reader_Callback, reader: ^
 capture_should_read :: proc(r: ^Renderer) -> bool {
 	return sync.atomic_load_explicit(&r.capture_running, .Acquire) &&
 		sync.atomic_load_explicit(&r.capture_refresh, .Acquire) == 0 &&
-		sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) == 0
+		sync.atomic_load_explicit(&r.edid.operation_active, .Acquire) == 0
 }
 
 // Requests the next asynchronous sample. A failure schedules source recovery.
@@ -191,8 +191,8 @@ capture_start :: proc(r: ^Renderer) -> bool {
 	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Release)
 	sync.atomic_store_explicit(&r.source_mode_count, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
-	sync.atomic_store_explicit(&r.edid_request_kind, u32(EDID_Request_Kind.None), .Release)
-	sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+	sync.atomic_store_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Release)
+	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 	renderer_set_edid_state(r, .Reading, .None)
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)
 	if r.capture_event == nil {
@@ -319,17 +319,17 @@ capture_service_edid_request :: proc(
 	callback: ^Source_Reader_Callback,
 	reader: ^IMFSourceReader,
 ) -> bool {
-	if sync.atomic_load_explicit(&r.edid_request_kind, .Acquire) == u32(EDID_Request_Kind.None) do return false
+	if sync.atomic_load_explicit(&r.edid.request_kind, .Acquire) == u32(EDID_Request_Kind.None) do return false
 	// Publish active before removing the mailbox entry so the UI never
 	// observes a false idle window between the two states.
-	sync.atomic_store_explicit(&r.edid_operation_active, 1, .Release)
-	kind := EDID_Request_Kind(sync.atomic_exchange_explicit(&r.edid_request_kind, u32(EDID_Request_Kind.None), .Acq_Rel))
+	sync.atomic_store_explicit(&r.edid.operation_active, 1, .Release)
+	kind := EDID_Request_Kind(sync.atomic_exchange_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Acq_Rel))
 	result := EDID_Result{
-		request_id = sync.atomic_load_explicit(&r.edid_request_id, .Acquire),
-		generation = sync.atomic_load_explicit(&r.edid_request_generation, .Acquire),
+		request_id = sync.atomic_load_explicit(&r.edid.request_id, .Acquire),
+		generation = sync.atomic_load_explicit(&r.edid.request_generation, .Acquire),
 	}
 	if result.generation != generation || !edid_available {
-		sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+		sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 		result.error = .Unsupported
 		renderer_publish_edid_result(r, result)
 		return true
@@ -341,10 +341,10 @@ capture_service_edid_request :: proc(
 		result.mode, result.error = edid_read_mode(transport)
 		result.mode_known = result.error == .None
 	} else {
-		requested := EDID_Mode(sync.atomic_load_explicit(&r.edid_requested_mode, .Acquire))
+		requested := EDID_Mode(sync.atomic_load_explicit(&r.edid.requested_mode, .Acquire))
 		result.mode, result.mode_known, result.disposition, result.error = edid_set_mode(transport, requested)
 	}
-	sync.atomic_store_explicit(&r.edid_operation_active, 0, .Release)
+	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 	renderer_publish_edid_result(r, result)
 	// An applied mode change restarts the session; otherwise resume sampling.
 	if !edid_requires_reconnect(result.disposition) && capture_should_read(r) do capture_read_next(r, reader)

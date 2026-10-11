@@ -154,7 +154,7 @@ capture_health_update :: proc(r: ^Renderer, now_ns := i64(-1)) {
 	h := &r.health
 	active := r.reconnect_thread == nil && sync.atomic_load_explicit(&r.capture_running, .Acquire) &&
 		sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0 &&
-		sync.atomic_load_explicit(&r.edid_operation_active, .Acquire) == 0 && !r.capture_suspended
+		sync.atomic_load_explicit(&r.edid.operation_active, .Acquire) == 0 && !r.capture_suspended
 	if !active {
 		if h.monitoring do capture_health_reset_timing(r, now_ns)
 		return

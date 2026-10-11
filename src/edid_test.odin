@@ -312,23 +312,23 @@ edid_protocol_distinguishes_failed_and_uncertain_writes_test :: proc(t: ^testing
 
 @(test)
 edid_mailbox_serializes_and_discards_stale_results_test :: proc(t: ^testing.T) {
-	r := Renderer{ready = true, capture_ready = 1, capture_running = true, capture_generation = 11, edid_status = u32(EDID_Availability.Ready), edid_mode_known = 1, edid_mode = u32(EDID_Mode.Display)}
+	r := Renderer{ready = true, capture_ready = 1, capture_running = true, capture_generation = 11, edid = {status = u32(EDID_Availability.Ready), mode_known = 1, mode = u32(EDID_Mode.Display)}}
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)
 	if !testing.expect(t, r.capture_event != nil) do return
 	defer win32.CloseHandle(r.capture_event)
 	testing.expect(t, renderer_request_edid_refresh(&r))
 	testing.expect(t, !renderer_request_edid_refresh(&r))
 	testing.expect(t, !renderer_request_edid_mode(&r, .Merged))
-	testing.expect_value(t, EDID_Request_Kind(r.edid_request_kind), EDID_Request_Kind.Refresh)
+	testing.expect_value(t, EDID_Request_Kind(r.edid.request_kind), EDID_Request_Kind.Refresh)
 
-	r.edid_request_kind = u32(EDID_Request_Kind.None)
-	r.edid_status = u32(EDID_Availability.Ready)
-	r.edid_mode = u32(EDID_Mode.Display)
+	r.edid.request_kind = u32(EDID_Request_Kind.None)
+	r.edid.status = u32(EDID_Availability.Ready)
+	r.edid.mode = u32(EDID_Mode.Display)
 	renderer_publish_edid_result(&r, EDID_Result{request_id = 99, generation = 10, mode = .Merged, mode_known = true})
-	testing.expect_value(t, EDID_Mode(r.edid_mode), EDID_Mode.Display)
-	testing.expect_value(t, r.edid_result_pending, u32(0))
+	testing.expect_value(t, EDID_Mode(r.edid.mode), EDID_Mode.Display)
+	testing.expect_value(t, r.edid.result_pending, u32(0))
 
-	r.edid_status = u32(EDID_Availability.Error)
+	r.edid.status = u32(EDID_Availability.Error)
 	testing.expect(t, renderer_request_edid_refresh(&r))
 }
 
@@ -342,13 +342,13 @@ edid_stale_message_preserves_pending_result_test :: proc(t: ^testing.T) {
 		mode_known = true,
 	})
 	renderer_handle_edid_result(&r, 11, 5)
-	testing.expect_value(t, r.edid_result_pending, u32(1))
+	testing.expect_value(t, r.edid.result_pending, u32(1))
 	renderer_handle_edid_result(&r, 12, 4)
-	testing.expect_value(t, r.edid_result_pending, u32(1))
+	testing.expect_value(t, r.edid.result_pending, u32(1))
 	renderer_handle_edid_result(&r, 12, 5)
-	testing.expect_value(t, r.edid_result_pending, u32(0))
-	testing.expect_value(t, EDID_Mode(r.edid_mode), EDID_Mode.Merged)
-	testing.expect_value(t, EDID_Availability(r.edid_status), EDID_Availability.Ready)
+	testing.expect_value(t, r.edid.result_pending, u32(0))
+	testing.expect_value(t, EDID_Mode(r.edid.mode), EDID_Mode.Merged)
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Ready)
 }
 
 @(test)
@@ -361,7 +361,7 @@ edid_reconnect_dispositions_test :: proc(t: ^testing.T) {
 
 @(test)
 edid_active_operation_defers_minimize_test :: proc(t: ^testing.T) {
-	r := Renderer{ready = true, capture_running = true, edid_operation_active = 1}
+	r := Renderer{ready = true, capture_running = true, edid = {operation_active = 1}}
 	renderer_suspend_capture(&r)
 	testing.expect(t, r.suspend_requested)
 	testing.expect(t, !r.capture_suspended)
@@ -377,19 +377,19 @@ edid_uncertain_write_requires_explicit_refresh_test :: proc(t: ^testing.T) {
 		error = .Readback_Failed,
 		disposition = .May_Have_Applied,
 	})
-	testing.expect_value(t, r.edid_mode_known, u32(0))
-	testing.expect_value(t, r.edid_verification_required, u32(1))
-	testing.expect_value(t, EDID_Availability(r.edid_status), EDID_Availability.Reconnecting)
-	testing.expect_value(t, EDID_Protocol_Error(r.edid_notice), EDID_Protocol_Error.Readback_Failed)
+	testing.expect_value(t, r.edid.mode_known, u32(0))
+	testing.expect_value(t, r.edid.verification_required, u32(1))
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Reconnecting)
+	testing.expect_value(t, EDID_Protocol_Error(r.edid.notice), EDID_Protocol_Error.Readback_Failed)
 
-	r.edid_result_pending = 0
+	r.edid.result_pending = 0
 	renderer_publish_edid_result(&r, EDID_Result{
 		request_id = 2,
 		generation = 3,
 		mode = .Merged,
 		mode_known = true,
 	})
-	testing.expect_value(t, r.edid_verification_required, u32(0))
-	testing.expect_value(t, r.edid_mode_known, u32(1))
-	testing.expect_value(t, EDID_Mode(r.edid_mode), EDID_Mode.Merged)
+	testing.expect_value(t, r.edid.verification_required, u32(0))
+	testing.expect_value(t, r.edid.mode_known, u32(1))
+	testing.expect_value(t, EDID_Mode(r.edid.mode), EDID_Mode.Merged)
 }
