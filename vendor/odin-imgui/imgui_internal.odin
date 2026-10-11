@@ -229,6 +229,7 @@ ActivateFlag :: enum i32 {
 
 
 // Early work-in-progress API for ScrollToItem()
+// FIXME: Missing flags to request making both edges visible when possible.
 ScrollFlags :: bit_set[ScrollFlag; i32]
 ScrollFlag :: enum i32 {
 	KeepVisibleEdgeX   = 0, // If item is not visible: scroll as little as possible on X axis to bring item back into view [default for X axis]
@@ -247,7 +248,6 @@ NavRenderCursorFlags :: bit_set[NavRenderCursorFlag; i32]
 NavRenderCursorFlag :: enum i32 {
 	Compact    = 1, // Compact highlight, no padding/distance from focused item
 	AlwaysDraw = 2, // Draw rectangular highlight if (g.NavId == id) even when g.NavCursorVisible == false, aka even when using the mouse.
-	NoRounding = 3,
 }
 
 
@@ -333,7 +333,10 @@ LocKey :: enum i32 { // Forward declared enum type ImGuiLocKey
 	TableSizeOne,
 	TableSizeAllFit,
 	TableSizeAllDefault,
+	TableReset,
+	//ImGuiLocKey_TableResetAll,
 	TableResetOrder,
+	TableResetVisibility,
 	WindowingMainMenuBar,
 	WindowingPopup,
 	WindowingUntitled,
@@ -360,12 +363,13 @@ DebugLogFlag :: enum i32 {
 	EventInputRouting  = 9,
 	EventDocking       = 10,
 	EventViewport      = 11,
+	EventTable         = 12,
 	OutputToTTY        = 20, // Also send output to TTY
 	OutputToDebugger   = 21, // Also send output to Debugger Console [Windows only]
 	OutputToTestEngine = 22, // Also send output to Dear ImGui Test Engine
 }
 
-DebugLogFlags_EventMask_ :: DebugLogFlags{.EventError,.EventActiveId,.EventFocus,.EventPopup,.EventNav,.EventClipper,.EventSelection,.EventIO,.EventFont,.EventInputRouting,.EventDocking,.EventViewport}
+DebugLogFlags_EventMask_ :: DebugLogFlags{.EventError,.EventActiveId,.EventFocus,.EventPopup,.EventNav,.EventClipper,.EventSelection,.EventTable,.EventIO,.EventFont,.EventInputRouting,.EventDocking,.EventViewport}
 
 ContextHookType :: enum i32 {
 	NewFramePre,
@@ -443,12 +447,6 @@ BitVector :: struct {
 	Storage: Vector_U32,
 }
 
-// Instantiation of ImSpan<ImGuiTableColumn>
-Span_ImGuiTableColumn :: struct {
-	Data:    ^TableColumn,
-	DataEnd: ^TableColumn,
-}
-
 // Instantiation of ImSpan<ImGuiTableColumnIdx>
 Span_ImGuiTableColumnIdx :: struct {
 	Data:    ^TableColumnIdx,
@@ -461,6 +459,12 @@ Span_ImGuiTableCellData :: struct {
 	DataEnd: ^TableCellData,
 }
 
+// Instantiation of ImSpan<ImGuiTableColumn>
+Span_ImGuiTableColumn :: struct {
+	Data:    ^TableColumn,
+	DataEnd: ^TableColumn,
+}
+
 // Instantiation of ImStableVector<ImFontBaked, 32>
 StableVector_ImFontBaked_32 :: struct {
 	Size:     i32,
@@ -468,25 +472,34 @@ StableVector_ImFontBaked_32 :: struct {
 	Blocks:   Vector_FontBakedPtr,
 }
 
+// Helper: ImGuiPackedDate (sizeof() == 2)
+// Store a date in a way that is efficient to read/write in text form. If we stored e.g. number of days since Epoch we'd need costlier back and forth.
+// This is specifically designed to be able to prune old .ini data.
+PackedDate :: struct {
+	Year:  u16, // Year since 2000      // We can change to another offset e.g. 1970 but this is easier to watch in debugger.
+	Month: u16, // Month (1-12)
+	Day:   u16, // Day (1-31)
+}
+
 // Data shared between all ImDrawList instances
 // Conceptually this could have been called e.g. ImDrawListSharedContext
 // Typically one ImGui context would create and maintain one of this.
 // You may want to create your own instance of you try to ImDrawList completely without ImGui. In that case, watch out for future changes to this structure.
 DrawListSharedData :: struct {
-	TexUvWhitePixel:       Vec2,               // UV of white pixel in the atlas (== FontAtlas->TexUvWhitePixel)
-	TexUvLines:            ^Vec4,              // UV of anti-aliased lines in the atlas (== FontAtlas->TexUvLines)
-	FontAtlas:             ^FontAtlas,         // Current font atlas
-	Font_:                 ^Font,              // Current font (used for simplified AddText overload)
-	FontSize:              f32,                // Current font size (used for for simplified AddText overload)
-	FontScale:             f32,                // Current font scale (== FontSize / Font->FontSize)
-	CurveTessellationTol:  f32,                // Tessellation tolerance when using PathBezierCurveTo()
-	CircleSegmentMaxError: f32,                // Number of circle segments to use per pixel of radius for AddCircle() etc
-	InitialFringeScale:    f32,                // Initial scale to apply to AA fringe
-	InitialFlags:          DrawListFlags,      // Initial flags at the beginning of the frame (it is possible to alter flags on a per-drawlist basis afterwards)
-	ClipRectFullscreen:    Vec4,               // Value for PushClipRectFullscreen()
-	TempBuffer:            Vector_Vec2,        // Temporary write buffer
-	DrawLists:             Vector_DrawListPtr, // All draw lists associated to this ImDrawListSharedData
-	Context:               ^Context,           // [OPTIONAL] Link to Dear ImGui context. 99% of ImDrawList/ImFontAtlas can function without an ImGui context, but this facilitate handling one legacy edge case.
+	TexUvWhitePixel:            Vec2,               // UV of white pixel in the atlas (== FontAtlas->TexUvWhitePixel)
+	TexUvLines:                 ^Vec4,              // UV of anti-aliased lines in the atlas (== FontAtlas->TexUvLines)
+	FontAtlas:                  ^FontAtlas,         // Current font atlas
+	Font_:                      ^Font,              // Current font (used for simplified AddText overload)
+	FontSize:                   f32,                // Current font size (used for for simplified AddText overload)
+	FontScale:                  f32,                // Current font scale (== FontSize / Font->FontSize)
+	CurveTessellationTol:       f32,                // Tessellation tolerance when using PathBezierCurveTo()
+	CircleTessellationMaxError: f32,                // Number of circle segments to use per pixel of radius for AddCircle() etc
+	InitialFringeScale:         f32,                // Initial scale to apply to AA fringe
+	InitialFlags:               DrawListFlags,      // Initial flags at the beginning of the frame (it is possible to alter flags on a per-drawlist basis afterwards)
+	ClipRectFullscreen:         Vec4,               // Value for PushClipRectFullscreen()
+	TempBuffer:                 Vector_Vec2,        // Temporary write buffer
+	DrawLists:                  Vector_DrawListPtr, // All draw lists associated to this ImDrawListSharedData
+	Context:                    ^Context,           // [OPTIONAL] Link to Dear ImGui context. 99% of ImDrawList/ImFontAtlas can function without an ImGui context, but this facilitate handling one legacy edge case.
 	// Lookup tables
 	ArcFastVtx:          [DRAWLIST_ARCFAST_TABLE_SIZE]Vec2, // Sample points on the quarter of the circle.
 	ArcFastRadiusCutoff: f32,                               // Cutoff radius after which arc drawing will fallback to slower PathArcTo()
@@ -814,20 +827,20 @@ ComboPreviewData :: struct {
 
 // Stacked storage data for BeginGroup()/EndGroup()
 GroupData :: struct {
-	WindowID:                             ID,
-	BackupCursorPos:                      Vec2,
-	BackupCursorMaxPos:                   Vec2,
-	BackupCursorPosPrevLine:              Vec2,
-	BackupIndent:                         Vec1,
-	BackupGroupOffset:                    Vec1,
-	BackupCurrLineSize:                   Vec2,
-	BackupCurrLineTextBaseOffset:         f32,
-	BackupActiveIdIsAlive:                ID,
-	BackupActiveIdHasBeenEditedThisFrame: bool,
-	BackupDeactivatedIdIsAlive:           bool,
-	BackupHoveredIdIsAlive:               bool,
-	BackupIsSameLine:                     bool,
-	EmitItem:                             bool,
+	WindowID:                          ID,
+	BackupCursorPos:                   Vec2,
+	BackupCursorMaxPos:                Vec2,
+	BackupCursorPosPrevLine:           Vec2,
+	BackupIndent:                      Vec1,
+	BackupGroupOffset:                 Vec1,
+	BackupCurrLineSize:                Vec2,
+	BackupCurrLineTextBaseOffset:      f32,
+	BackupActiveIdIsAlive:             ID,
+	BackupAnyIdHasBeenEditedThisFrame: bool,
+	BackupDeactivatedIdIsAlive:        bool,
+	BackupHoveredIdIsAlive:            bool,
+	BackupIsSameLine:                  bool,
+	EmitItem:                          bool,
 }
 
 // Simple column measurement, currently used for MenuItem() only.. This is very short-sighted/throw-away code and NOT a generic helper.
@@ -845,8 +858,9 @@ MenuColumns :: struct {
 // Internal temporary state for deactivating InputText() instances.
 // Store as part of ImGuiDeactivatedItemData?
 InputTextDeactivatedState :: struct {
-	ID_:   ID,          // widget id owning the text state (which just got deactivated)
-	TextA: Vector_char, // text buffer
+	ID_:         ID,          // widget id owning the text state (which just got deactivated)
+	ElapseFrame: i32,
+	TextA:       Vector_char, // text buffer
 }
 
 Stb_STB_TexteditState :: struct {
@@ -855,27 +869,28 @@ Stb_STB_TexteditState :: struct {
 // Internal state of the currently focused/edited text input box
 // For a given item ID, access with ImGui::GetInputTextState()
 InputTextState :: struct {
-	Ctx:                  ^Context,       // parent UI context (needs to be set explicitly by parent).
-	Stb:                  rawptr,         // State for stb_textedit.h
-	Flags:                InputTextFlags, // copy of InputText() flags. may be used to check if e.g. ImGuiInputTextFlags_Password is set.
-	ID_:                  ID,             // widget id owning the text state
-	TextLen:              i32,            // UTF-8 length of the string in TextA (in bytes)
-	TextSrc:              cstring,        // == TextA.Data unless read-only, in which case == buf passed to InputText(). For _ReadOnly fields, pointer will be null outside the InputText() call.
-	TextA:                Vector_char,    // main UTF8 buffer. TextA.Size is a buffer size! Should always be >= buf_size passed by user (and of course >= CurLenA + 1).
-	TextToRevertTo:       Vector_char,    // value to revert to when pressing Escape = backup of end-user buffer at the time of focus (in UTF-8, unaltered)
-	CallbackTextBackup:   Vector_char,    // temporary storage for callback to support automatic reconcile of undo-stack
-	BufCapacity:          i32,            // end-user buffer capacity (include zero terminator)
-	Scroll:               Vec2,           // horizontal offset (managed manually) + vertical scrolling (pulled from child window's own Scroll.y)
-	LineCount:            i32,            // last line count (solely for debugging)
-	WrapWidth:            f32,            // word-wrapping width
-	CursorAnim:           f32,            // timer for cursor blink, reset on every user action so the cursor reappears immediately
-	CursorFollow:         bool,           // set when we want scrolling to follow the current cursor position (not always!)
-	CursorCenterY:        bool,           // set when we want scrolling to be centered over the cursor position (while resizing a word-wrapping field)
-	SelectedAllMouseLock: bool,           // after a double-click to select all, we ignore further mouse drags to update selection
-	EditedBefore:         bool,           // edited since activated
-	EditedThisFrame:      bool,           // edited this frame
-	WantReloadUserBuf:    bool,           // force a reload of user buf so it may be modified externally. may be automatic in future version.
-	LastMoveDirectionLR:  i8,             // ImGuiDir_Left or ImGuiDir_Right. track last movement direction so when cursor cross over a word-wrapping boundaries we can display it on either line depending on last move.s
+	Ctx:   ^Context,       // parent UI context (needs to be set explicitly by parent).
+	Stb:   rawptr,         // State for stb_textedit.h
+	Flags: InputTextFlags, // copy of InputText() flags. may be used to check if e.g. ImGuiInputTextFlags_Password is set.
+	ID_:   ID,             // widget id owning the text state
+	//int                   LastFrameActive;        // Last used frame-count (unused)
+	TextLen:              i32,         // UTF-8 length of the string in TextA (in bytes)
+	TextSrc:              cstring,     // == TextA.Data unless read-only, in which case == buf passed to InputText(). For _ReadOnly fields, pointer will be null outside the InputText() call.
+	TextA:                Vector_char, // main UTF8 buffer. TextA.Size is a buffer size! Should always be >= buf_size passed by user (and of course >= CurLenA + 1).
+	TextToRevertTo:       Vector_char, // value to revert to when pressing Escape = backup of end-user buffer at the time of focus (in UTF-8, unaltered)
+	CallbackTextBackup:   Vector_char, // temporary storage for callback to support automatic reconcile of undo-stack
+	BufCapacity:          i32,         // end-user buffer capacity (include zero terminator)
+	Scroll:               Vec2,        // horizontal offset (managed manually) + vertical scrolling (pulled from child window's own Scroll.y)
+	LineCount:            i32,         // last line count (solely for debugging)
+	WrapWidth:            f32,         // word-wrapping width
+	CursorAnim:           f32,         // timer for cursor blink, reset on every user action so the cursor reappears immediately
+	CursorFollow:         bool,        // set when we want scrolling to follow the current cursor position (not always!)
+	CursorCenterY:        bool,        // set when we want scrolling to be centered over the cursor position (while resizing a word-wrapping field)
+	SelectedAllMouseLock: bool,        // after a double-click to select all, we ignore further mouse drags to update selection
+	EditedBefore:         bool,        // edited since activated
+	EditedThisFrame:      bool,        // edited this frame
+	WantReloadUserBuf:    bool,        // force a reload of user buf so it may be modified externally. may be automatic in future version.
+	LastMoveDirectionLR:  i8,          // ImGuiDir_Left or ImGuiDir_Right. track last movement direction so when cursor cross over a word-wrapping boundaries we can display it on either line depending on last move.s
 	ReloadSelectionStart: i32,
 	ReloadSelectionEnd:   i32,
 }
@@ -909,8 +924,8 @@ NextWindowData :: struct {
 }
 
 NextItemData :: struct {
-	HasFlags:  NextItemDataFlags, // Called HasFlags instead of Flags to avoid mistaking this
-	ItemFlags: ItemFlags,         // Currently only tested/used for ImGuiItemFlags_AllowOverlap and ImGuiItemFlags_HasSelectionUserData.
+	HasFlags:     NextItemDataFlags, // Called HasFlags instead of Flags to avoid mistaking this
+	ItemFlagsSet: ItemFlags,         // Currently only tested/used for ImGuiItemFlags_AllowOverlap and ImGuiItemFlags_HasSelectionUserData.
 	// Members below are NOT cleared by ItemAdd() meaning they are still valid during e.g. NavProcessItem(). Always rely on HasFlags.
 	FocusScopeId:      ID,                // Set by SetNextItemSelectionUserData()
 	SelectionUserData: SelectionUserData, // Set by SetNextItemSelectionUserData() (note that NULL/0 is a valid value, we use -1 == ImGuiSelectionUserData_Invalid to mark invalid values)
@@ -1209,15 +1224,16 @@ MultiSelectTempData :: struct {
 	BackupCursorMaxPos: Vec2,
 	//ImGuiSelectionUserData CurrSubmittedItem; // Copy of last submitted item data, used to merge output ranges.
 	//ImGuiSelectionUserData PrevSubmittedItem; // Copy of previous submitted item data, used to merge output ranges.
-	BoxSelectId:        ID,
-	KeyMods:            KeyChord,
-	LoopRequestSetAll:  i8,       // -1: no operation, 0: clear all, 1: select all.
-	IsEndIO:            bool,     // Set when switching IO from BeginMultiSelect() to EndMultiSelect() state.
-	IsFocused:          bool,     // Set if currently focusing the selection scope (any item of the selection). May be used if you have custom shortcut associated to selection.
-	IsKeyboardSetRange: bool,     // Set by BeginMultiSelect() when using Shift+Navigation. Because scrolling may be affected we can't afford a frame of lag with Shift+Navigation.
-	NavIdPassedBy:      bool,
-	RangeSrcPassedBy:   bool,     // Set by the item that matches RangeSrcItem.
-	RangeDstPassedBy:   bool,     // Set by the item that matches NavJustMovedToId when IsSetRange is set.
+	BoxSelectId:                  ID,
+	KeyMods:                      KeyChord,
+	LoopRequestSetAll:            i8,       // -1: no operation, 0: clear all, 1: select all.
+	IsEndIO:                      bool,     // Set when switching IO from BeginMultiSelect() to EndMultiSelect() state.
+	IsFocused:                    bool,     // Set if currently focusing the selection scope (any item of the selection). May be used if you have custom shortcut associated to selection.
+	IsKeyboardSetRange:           bool,     // Set by BeginMultiSelect() when using Shift+Navigation. Because scrolling may be affected we can't afford a frame of lag with Shift+Navigation.
+	NavIdPassedBy:                bool,
+	RangeSrcPassedBy:             bool,     // Set by the item that matches RangeSrcItem.
+	RangeDstPassedBy:             bool,     // Set by the item that matches NavJustMovedToId when IsSetRange is set.
+	IsSoleOrUnknownSelectionSize: bool,
 }
 
 // Persistent storage for multi-select (as long as selection is alive)
@@ -1262,9 +1278,9 @@ DockNode :: struct {
 	SelectedTabId:          ID,               // [Leaf node only] Which of our tab/window is selected.
 	WantCloseTabId:         ID,               // [Leaf node only] Set when closing a specific tab/window.
 	RefViewportId:          ID,               // Reference viewport ID from visible window when HostWindow == NULL.
-	AuthorityForPos:        DataAuthority,
-	AuthorityForSize:       DataAuthority,
-	AuthorityForViewport:   DataAuthority,
+	AuthorityForPos:        u8,               // ImGuiDataAuthority
+	AuthorityForSize:       u8,
+	AuthorityForViewport:   u8,
 	IsVisible:              bool,             // Set to false when the node is hidden (usually disabled as it has no active window)
 	IsFocused:              bool,
 	IsBgDrawnThisFrame:     bool,
@@ -1351,18 +1367,29 @@ ViewportP :: struct {
 // Because we never destroy or rename ImGuiWindowSettings, we can store the names in a separate buffer easily.
 // (this is designed to be stored in a ImChunkStream buffer, with the variable-length Name following our structure)
 WindowSettings :: struct {
-	ID_:         ID,
-	Pos:         Vec2ih, // NB: Settings position are stored RELATIVE to the viewport! Whereas runtime ones are absolute positions.
-	Size:        Vec2ih,
-	ViewportPos: Vec2ih,
-	ViewportId:  ID,
-	DockId:      ID,     // ID of last known DockNode (even if the DockNode is invisible because it has only 1 active window), or 0 if none.
-	ClassId:     ID,     // ID of window class if specified
-	DockOrder:   i16,    // Order of the last time the window was visible within its DockNode. This is used to reorder windows that are reappearing on the same frame. Same value between windows that were active and windows that were none are possible.
-	Collapsed:   bool,
-	IsChild:     bool,
-	WantApply:   bool,   // Set when loaded from .ini data (to enable merging/loading .ini data into an already running context)
-	WantDelete:  bool,   // Set to invalidate/delete the settings entry
+	ID_:          ID,
+	Pos:          Vec2ih,     // NB: Settings position are stored RELATIVE to the viewport! Whereas runtime ones are absolute positions.
+	Size:         Vec2ih,
+	ViewportPos:  Vec2ih,
+	ViewportId:   ID,
+	DockId:       ID,         // ID of last known DockNode (even if the DockNode is invisible because it has only 1 active window), or 0 if none.
+	ClassId:      ID,         // ID of window class if specified
+	DockOrder:    i16,        // Order of the last time the window was visible within its DockNode. This is used to reorder windows that are reappearing on the same frame. Same value between windows that were active and windows that were none are possible.
+	LastUsedDate: PackedDate,
+	Collapsed:    bool,
+	IsChild:      bool,
+	WantApply:    bool,       // Set when loaded from .ini data (to enable merging/loading .ini data into an already running context)
+	WantDelete:   bool,       // Set to invalidate/delete the settings entry
+}
+
+SettingsCleanupArgs :: struct {
+	TypeHashFilter:                       ID,   // Set to restrict cleanup to a given .ini type, e.g. == ImHashStr("Window"), ImHashStr("Table"). Otherwise every types supporting Cleanup will be affected.
+	DiscardOlderThanMonths:               i32,  // Enable to discard entries older than XX months.
+	DiscardWhenMissingDate:               bool, // Enable to discard entries missing a date.
+	DiscardAll:                           bool, // Enable to discard all entries = same as calling ClearIniSettings() except it may be filtered.
+	SetCurrentSessionDateToAll:           bool, // Enable to write current SessionDate to all supporting entries. // Let us know in #9460 if you use this.
+	SetCurrentSessionDateWhenMissingDate: bool, // Enable to write current SessionDate to all supporting entries missing a date. // Let us know in #9460 if you use this.
+	_DiscardOlderThanDate:                i32,  // [Internal]
 }
 
 SettingsHandler :: struct {
@@ -1374,6 +1401,7 @@ SettingsHandler :: struct {
 	ReadLineFn: proc "c" (ctx: ^Context, handler: ^SettingsHandler, entry: rawptr, line: cstring), // Read: Called for every line of text within an ini entry
 	ApplyAllFn: proc "c" (ctx: ^Context, handler: ^SettingsHandler),                               // Read: Called after reading (in registration order)
 	WriteAllFn: proc "c" (ctx: ^Context, handler: ^SettingsHandler, out_buf: ^TextBuffer),         // Write: Output every entries into 'out_buf'
+	CleanupFn:  proc "c" (ctx: ^Context, handler: ^SettingsHandler, args: ^SettingsCleanupArgs),   // Cleanup/patch settings
 	UserData:   rawptr,
 }
 
@@ -1396,21 +1424,23 @@ DebugAllocInfo :: struct {
 }
 
 MetricsConfig :: struct {
-	ShowDebugLog:             bool,
-	ShowIDStackTool:          bool,
-	ShowWindowsRects:         bool,
-	ShowWindowsBeginOrder:    bool,
-	ShowTablesRects:          bool,
-	ShowDrawCmdMesh:          bool,
-	ShowDrawCmdBoundingBoxes: bool,
-	ShowTextEncodingViewer:   bool,
-	ShowTextureUsedRect:      bool,
-	ShowDockingNodes:         bool,
-	ShowWindowsRectsType:     i32,
-	ShowTablesRectsType:      i32,
-	HighlightMonitorIdx:      i32,
-	HighlightViewportID:      ID,
-	ShowFontPreview:          bool,
+	ShowDebugLog:                bool,
+	ShowIDStackTool:             bool,
+	ShowWindowsRects:            bool,
+	ShowWindowsBeginOrder:       bool,
+	ShowTablesRects:             bool,
+	ShowDrawCmdMesh:             bool,
+	ShowDrawCmdBoundingBoxes:    bool,
+	ShowTextEncodingViewer:      bool,
+	ShowTextureUsedRect:         bool,
+	ShowDockingNodes:            bool,
+	ShowWindowsRectsType:        i32,
+	ShowTablesRectsType:         i32,
+	HighlightMonitorIdx:         i32,
+	HighlightViewportID:         ID,
+	SettingsDiscardMonths:       i32,
+	SettingsHighlightOldEntries: bool,
+	ShowFontPreview:             bool,
 }
 
 StackLevelInfo :: struct {
@@ -1512,10 +1542,13 @@ Context :: struct {
 	HoveredIdAllowOverlap:           bool,
 	HoveredIdIsDisabled:             bool,                // At least one widget passed the rect test, but has been discarded by disabled flag or popup inhibit. May be true even if HoveredId == 0.
 	ItemUnclipByLog:                 bool,                // Disable ItemAdd() clipping, essentially a memory-locality friendly copy of LogEnabled
+	AnyIdHasBeenEditedThisFrame:     bool,
 	ActiveId:                        ID,                  // Active widget
 	ActiveIdIsAlive:                 ID,                  // Active widget has been seen this frame (we can't use a bool as the ActiveId may change within the frame)
 	ActiveIdTimer:                   f32,
 	ActiveIdIsJustActivated:         bool,                // Set at the time of activation for one frame
+	ActiveIdWasSelected:             bool,                // Active ID was selected at the time of activating
+	ActiveIdWasSoleSelected:         bool,                // Active ID was sole selection at the time of activating
 	ActiveIdAllowOverlap:            bool,                // Active widget allows another widget to steal active id (generally for overlapping widgets, but not always)
 	ActiveIdNoClearOnFocusLoss:      bool,                // Disable losing active id if the active id window gets unfocused.
 	ActiveIdHasBeenPressedBefore:    bool,                // Track whether the active id led to a press (this is to allow changing between PressOnClick and PressOnRelease without pressing twice). Used by range_select branch.
@@ -1532,6 +1565,8 @@ Context :: struct {
 	ActiveIdValueOnActivation:       DataTypeStorage,     // Backup of initial value at the time of activation. ONLY SET BY SPECIFIC WIDGETS: DragXXX and SliderXXX.
 	LastActiveId:                    ID,                  // Store the last non-zero ActiveId, useful for animation.
 	LastActiveIdTimer:               f32,                 // Store the last non-zero ActiveId timer since the beginning of activation, useful for animation.
+	LastActiveIdWasSelected:         bool,
+	LastActiveIdWasSoleSelected:     bool,
 	// Key/Input Ownership + Shortcut Routing system
 	// - The idea is that instead of "eating" a given key, we can link to an owner.
 	// - Input query can then read input by specifying ImGuiKeyOwner_Any (== 0), ImGuiKeyOwner_NoOwner (== -1) or a custom ID.
@@ -1717,7 +1752,6 @@ Context :: struct {
 	DataTypeZeroValue:                DataTypeStorage,           // 0 for all data types
 	BeginMenuDepth:                   i32,
 	BeginComboDepth:                  i32,
-	ColorEditOptions:                 ColorEditFlags,            // Store user options for color edit widgets
 	ColorEditCurrentID:               ID,                        // Set temporarily while inside of the parent-most ColorEdit4/ColorPicker4 (because they call each others).
 	ColorEditSavedID:                 ID,                        // ID we are saving/restoring HS for
 	ColorEditSavedHue:                f32,                       // Backup of last Hue associated to LastColor, so we can restore Hue in lossy RGB<>HSV round trips
@@ -1751,6 +1785,7 @@ Context :: struct {
 	DockContext:               DockContext,
 	DockNodeWindowMenuHandler: proc "c" (ctx: ^Context, node: ^DockNode, tab_bar: ^TabBar),
 	// Settings
+	SessionDate:        PackedDate,                      // Packed copy of platform_io.Platform_SessionDate, when valid.
 	SettingsLoaded:     bool,
 	SettingsDirtyTimer: f32,                             // Save .ini Settings to memory when time reaches zero
 	SettingsIniData:    TextBuffer,                      // In memory .ini settings
@@ -2064,7 +2099,7 @@ TabBar :: struct {
 	TabsNames:                       TextBuffer,     // For non-docking tab bar we re-append names in a contiguous buffer.
 }
 
-// [Internal] sizeof() ~ 112
+// [Internal] sizeof() ~ 120
 // We use the terminology "Enabled" to refer to a column that is not Hidden by user/api.
 // We use the terminology "Clipped" to refer to a column that is out of sight because of scrolling/clipping.
 // This is in contrast with some user-facing api such as IsItemVisible() / IsRectVisible() which use "Visible" to mean "not clipped".
@@ -2079,7 +2114,8 @@ TableColumn :: struct {
 	StretchWeight:            f32,                 // Master width weight when (Flags & _WidthStretch). Often around ~1.0f initially.
 	InitStretchWeightOrWidth: f32,                 // Value passed to TableSetupColumn(). For Width it is a content width (_without padding_).
 	ClipRect:                 Rect,                // Clipping rectangle for the column
-	UserID:                   ID,                  // Optional, value passed to TableSetupColumn()
+	ID_:                      ID,                  // Hash of column name (ignoring top of ID stack), used for .ini persistence when available.
+	UserData:                 ID,                  // (Optional) User data value passed to TableSetupColumn()
 	WorkMinX:                 f32,                 // Contents region min ~(MinX + CellPaddingX + CellSpacingX1) == cursor start position when entering column
 	WorkMaxX:                 f32,                 // Contents region max ~(MaxX - CellPaddingX - CellSpacingX2)
 	ItemWidth:                f32,                 // Current item width for the column, preserved across rows
@@ -2104,13 +2140,38 @@ TableColumn :: struct {
 	IsRequestOutput:          bool,                // Return value for TableSetColumnIndex() / TableNextColumn(): whether we request user to output contents or not.
 	IsSkipItems:              bool,                // Do we want item submissions to this column to be completely ignored (no layout will happen).
 	IsPreserveWidthAuto:      bool,
+	IsJustCreated:            bool,
+	IsLoadedSettings:         bool,
+	IsNeedReconcileSrc:       bool,
+	IsNeedReconcileDst:       bool,
 	NavLayerCurrent:          i8,                  // ImGuiNavLayer in 1 byte
-	AutoFitQueue:             u8,                  // Queue of 8 values for the next 8 frames to request auto-fit
-	CannotSkipItemsQueue:     u8,                  // Queue of 8 values for the next 8 frames to disable Clipped/SkipItem
+	AutoFitQueue:             u8,                  // Queue of 4 values for the next 4 frames to request auto-fit
+	CannotSkipItemsQueue:     u8,                  // Queue of 4 values for the next 4 frames to disable Clipped/SkipItem
 	SortDirection:            u8,                  // ImGuiSortDirection_Ascending or ImGuiSortDirection_Descending
 	SortDirectionsAvailCount: u8,                  // Number of available sort directions (0 to 3)
 	SortDirectionsAvailMask:  u8,                  // Mask of available sort directions (1-bit each)
 	SortDirectionsAvailList:  u8,                  // Ordered list of available sort directions (2-bits each, total 8-bits)
+}
+
+// Passed to TableSetupColumn()
+// sizeof() ~ 24+120 bytes
+TableReconcileColumnData :: struct {
+	// Setup data
+	ID_:               ID,
+	NameOffset:        i16,
+	Flags:             TableColumnFlags,
+	InitWidthOrWeight: f32,
+	UserData:          ID,
+	// Reconcile data
+	ColumnNewIdx:  TableColumnIdx, // Index in the current table.
+	ColumnOldIdx:  TableColumnIdx, // Index in the previous frame table.
+	ColumnOldData: TableColumn,    // Full backup of the column. Could be avoided by storing 1 of them and applying reconcile in the right order. Not worth bothering.
+}
+
+Vector_TableReconcileColumnData :: struct { // Instantiation of ImVector<ImGuiTableReconcileColumnData>
+	Size:     i32,
+	Capacity: i32,
+	Data:     ^TableReconcileColumnData,
 }
 
 // Transient cell data stored per row.
@@ -2240,6 +2301,7 @@ Table :: struct {
 	IsLayoutLocked:             bool,                        // Set by TableUpdateLayout() which is called when beginning the first row.
 	IsInsideRow:                bool,                        // Set when inside TableBeginRow()/TableEndRow().
 	IsInitializing:             bool,
+	IsReconcileMode:            bool,
 	IsSortSpecsDirty:           bool,
 	IsUsingHeaders:             bool,                        // Set when the first row had the ImGuiTableRowFlags_Headers flag.
 	IsContextPopupOpen:         bool,                        // Set when default context menu is open (also see: ContextPopupColumn, InstanceInteracted).
@@ -2247,8 +2309,10 @@ Table :: struct {
 	IsSettingsRequestLoad:      bool,
 	IsSettingsDirty:            bool,                        // Set when table settings have changed and needs to be reported into ImGuiTableSettings data.
 	IsDefaultDisplayOrder:      bool,                        // Set when display order is unchanged from default (DisplayOrder contains 0...Count-1)
-	IsResetAllRequest:          bool,
+	IsDefaultVisibility:        bool,                        // Set when enabled/visibility is unchanged from default
+	IsResetAllRequest:          bool,                        // Set to queue a call to TableResetSettings() in BeginTable()
 	IsResetDisplayOrderRequest: bool,
+	IsResetVisibilityRequest:   bool,
 	IsUnfrozenRows:             bool,                        // Set when we got past the frozen row.
 	IsDefaultSizingPolicy:      bool,                        // Set if user didn't explicitly set a sizing policy in BeginTable()
 	IsActiveIdAliveBeforeTable: bool,
@@ -2263,35 +2327,40 @@ Table :: struct {
 // - Accessing those requires chasing an extra pointer so for very frequently used data we leave them in the main table structure.
 // - We also leave out of this structure data that tend to be particularly useful for debugging/metrics.
 // FIXME-TABLE: more transient data could be stored in a stacked ImGuiTableTempData: e.g. SortSpecs.
-// sizeof() ~ 136 bytes.
+// sizeof() ~ 176 bytes.
 TableTempData :: struct {
-	WindowID:                     ID,                     // Shortcut to g.Tables[TableIndex]->OuterWindow->ID.
-	TableIndex:                   i32,                    // Index in g.Tables.Buf[] pool
-	LastTimeActive:               f32,                    // Last timestamp this structure was used
-	AngledHeadersExtraWidth:      f32,                    // Used in EndTable()
-	AngledHeadersRequests:        Vector_TableHeaderData, // Used in TableAngledHeadersRow()
-	UserOuterSize:                Vec2,                   // outer_size.x passed to BeginTable()
+	WindowID:                ID,                     // Shortcut to g.Tables[TableIndex]->OuterWindow->ID.
+	TableIndex:              i32,                    // Index in g.Tables.Buf[] pool
+	LastTimeActive:          f32,                    // Last timestamp this structure was used
+	AngledHeadersExtraWidth: f32,                    // Used in EndTable()
+	AngledHeadersRequests:   Vector_TableHeaderData, // Used in TableAngledHeadersRow() // FIXME: Single instance is enough?
+	// Topology change
+	ReconcileColumnsRequests:     Vector_TableReconcileColumnData, // Used in TableSetupColumn(), TableUpdateLayout(). Cleared every frame.
+	OldColumnsRawData:            rawptr,                          // Used in BeginTable() -> TableUpdateLayout() when resizing.
+	OldColumnsData:               Span_ImGuiTableColumn,
+	UserOuterSize:                Vec2,                            // outer_size.x passed to BeginTable()
 	DrawSplitter:                 DrawListSplitter,
-	HostBackupWorkRect:           Rect,                   // Backup of InnerWindow->WorkRect at the end of BeginTable()
-	HostBackupParentWorkRect:     Rect,                   // Backup of InnerWindow->ParentWorkRect at the end of BeginTable()
-	HostBackupPrevLineSize:       Vec2,                   // Backup of InnerWindow->DC.PrevLineSize at the end of BeginTable()
-	HostBackupCurrLineSize:       Vec2,                   // Backup of InnerWindow->DC.CurrLineSize at the end of BeginTable()
-	HostBackupCursorMaxPos:       Vec2,                   // Backup of InnerWindow->DC.CursorMaxPos at the end of BeginTable()
-	HostBackupColumnsOffset:      Vec1,                   // Backup of OuterWindow->DC.ColumnsOffset at the end of BeginTable()
-	HostBackupItemWidth:          f32,                    // Backup of OuterWindow->DC.ItemWidth at the end of BeginTable()
-	HostBackupItemWidthStackSize: i32,                    //Backup of OuterWindow->DC.ItemWidthStack.Size at the end of BeginTable()
+	HostBackupWorkRect:           Rect,                            // Backup of InnerWindow->WorkRect at the end of BeginTable()
+	HostBackupParentWorkRect:     Rect,                            // Backup of InnerWindow->ParentWorkRect at the end of BeginTable()
+	HostBackupPrevLineSize:       Vec2,                            // Backup of InnerWindow->DC.PrevLineSize at the end of BeginTable()
+	HostBackupCurrLineSize:       Vec2,                            // Backup of InnerWindow->DC.CurrLineSize at the end of BeginTable()
+	HostBackupCursorMaxPos:       Vec2,                            // Backup of InnerWindow->DC.CursorMaxPos at the end of BeginTable()
+	HostBackupColumnsOffset:      Vec1,                            // Backup of OuterWindow->DC.ColumnsOffset at the end of BeginTable()
+	HostBackupItemWidth:          f32,                             // Backup of OuterWindow->DC.ItemWidth at the end of BeginTable()
+	HostBackupItemWidthStackSize: i32,                             //Backup of OuterWindow->DC.ItemWidthStack.Size at the end of BeginTable()
 }
 
 // sizeof() ~ 16
 TableColumnSettings :: struct {
 	WidthOrWeight: f32,
-	UserID:        ID,
+	ID_:           ID,
 	Index:         TableColumnIdx,
 	DisplayOrder:  TableColumnIdx,
 	SortOrder:     TableColumnIdx,
 	SortDirection: u8,
-	IsEnabled:     i8,             // "Visible" in ini file
+	IsEnabled:     i8,             // "Visible" in .ini file
 	IsStretch:     u8,
+	IsLoaded:      bool,           // Using during loading to mark finding a matching column.
 }
 
 // This is designed to be stored in a single ImChunkStream (1 header followed by N ImGuiTableColumnSettings, etc.)
@@ -2301,6 +2370,7 @@ TableSettings :: struct {
 	RefScale:        f32,            // Reference scale to be able to rescale columns on font/dpi changes.
 	ColumnsCount:    TableColumnIdx,
 	ColumnsCountMax: TableColumnIdx, // Maximum number of columns this settings instance can store, we can recycle a settings instance with lower number of columns but not higher
+	LastUsedDate:    PackedDate,
 	WantApply:       bool,           // Set when loaded from .ini data (to enable merging/loading .ini data into an already running context)
 }
 
@@ -2493,6 +2563,7 @@ foreign lib {
 	@(link_name="cImFloorImVec2")                            cImFloorImVec2                            :: proc(v: Vec2) -> Vec2                                   ---
 	@(link_name="cImTrunc64")                                cImTrunc64                                :: proc(f: f32) -> f32                                     ---
 	@(link_name="cImRound64")                                cImRound64                                :: proc(f: f32) -> f32                                     --- // FIXME: Positive values only.
+	@(link_name="cImCeilFast")                               cImCeilFast                               :: proc(f: f32) -> f32                                     --- // Consider using the the bit-hack version (search for "0x1p120f").
 	@(link_name="cImModPositive")                            cImModPositive                            :: proc(a: i32, b: i32) -> i32                             ---
 	@(link_name="cImDot")                                    cImDot                                    :: proc(a: Vec2, b: Vec2) -> f32                           ---
 	@(link_name="cImRotate")                                 cImRotate                                 :: proc(v: Vec2, cos_a: f32, sin_a: f32) -> Vec2           ---
@@ -2557,6 +2628,9 @@ foreign lib {
 	@(link_name="ImGuiTextIndex_get_line_begin")         TextIndex_get_line_begin            :: proc(self: ^TextIndex, base: cstring, n: i32) -> cstring                         ---
 	@(link_name="ImGuiTextIndex_get_line_end")           TextIndex_get_line_end              :: proc(self: ^TextIndex, base: cstring, n: i32) -> cstring                         ---
 	@(link_name="ImGuiTextIndex_append")                 TextIndex_append                    :: proc(self: ^TextIndex, base: cstring, old_size: i32, new_size: i32)              ---
+	@(link_name="ImGuiPackedDate_IsValid")               PackedDate_IsValid                  :: proc(self: ^PackedDate) -> bool                                                  ---
+	@(link_name="ImGuiPackedDate_Unpack")                PackedDate_Unpack                   :: proc(self: ^PackedDate) -> i32                                                   --- // Unpack
+	@(link_name="ImGuiPackedDate_SubtractMonths")        PackedDate_SubtractMonths           :: proc(self: ^PackedDate, m: i32)                                                  --- // FIXME-OPT: Stupid but enough for what we do with it.
 	// Helper: ImGuiStorage
 	@(link_name="cImLowerBound")                                      cImLowerBound                                    :: proc(in_begin: ^StoragePair, in_end: ^StoragePair, key: ID) -> ^StoragePair              ---
 	@(link_name="ImDrawListSharedData_SetCircleTessellationMaxError") DrawListSharedData_SetCircleTessellationMaxError :: proc(self: ^DrawListSharedData, max_error: f32)                                          ---
@@ -2631,6 +2705,80 @@ foreign lib {
 	@(link_name="ImGuiWindow_TitleBarRect")             Window_TitleBarRect             :: proc(self: ^Window) -> Rect                        ---
 	@(link_name="ImGuiWindow_MenuBarRect")              Window_MenuBarRect              :: proc(self: ^Window) -> Rect                        ---
 	@(link_name="ImGuiTableSettings_GetColumnSettings") TableSettings_GetColumnSettings :: proc(self: ^TableSettings) -> ^TableColumnSettings ---
+	// Tables: Candidates for public API
+	@(link_name="ImGui_TableOpenContextMenu")              TableOpenContextMenu              :: proc(column_n: i32 = -1)                                                                    ---
+	@(link_name="ImGui_TableSetColumnWidth")               TableSetColumnWidth               :: proc(column_n: i32, width: f32)                                                             ---
+	@(link_name="ImGui_TableSetColumnSortDirection")       TableSetColumnSortDirection       :: proc(column_n: i32, sort_direction: SortDirection, append_to_sort_specs: bool)              ---
+	@(link_name="ImGui_TableGetHoveredRow")                TableGetHoveredRow                :: proc() -> i32                                                                               --- // Retrieve *PREVIOUS FRAME* hovered row. This difference with TableGetHoveredColumn() is the reason why this is not public yet.
+	@(link_name="ImGui_TableGetHeaderRowHeight")           TableGetHeaderRowHeight           :: proc() -> f32                                                                               ---
+	@(link_name="ImGui_TableGetHeaderAngledMaxLabelWidth") TableGetHeaderAngledMaxLabelWidth :: proc() -> f32                                                                               ---
+	@(link_name="ImGui_TablePushBackgroundChannel")        TablePushBackgroundChannel        :: proc()                                                                                      ---
+	@(link_name="ImGui_TablePopBackgroundChannel")         TablePopBackgroundChannel         :: proc()                                                                                      ---
+	@(link_name="ImGui_TablePushColumnChannel")            TablePushColumnChannel            :: proc(column_n: i32)                                                                         ---
+	@(link_name="ImGui_TablePopColumnChannel")             TablePopColumnChannel             :: proc()                                                                                      ---
+	@(link_name="ImGui_TableAngledHeadersRowEx")           TableAngledHeadersRowEx           :: proc(row_id: ID, angle: f32, max_label_width: f32, data: ^TableHeaderData, data_count: i32) ---
+	// Tables: Internals
+	@(link_name="ImGui_GetCurrentTable")                                     GetCurrentTable                                     :: proc() -> ^Table                                                                                                                   ---
+	@(link_name="ImGui_TableFindByID")                                       TableFindByID                                       :: proc(id: ID) -> ^Table                                                                                                             ---
+	@(link_name="ImGui_BeginTableWithID")                                    BeginTableWithID                                    :: proc(name: cstring, id: ID, columns_count: i32, flags: TableFlags = {}, outer_size: Vec2 = {0, 0}, inner_width: f32 = 0.0) -> bool ---
+	@(link_name="ImGui_TableBeginInitMemory")                                TableBeginInitMemory                                :: proc(table: ^Table, columns_count: i32)                                                                                            ---
+	@(link_name="ImGui_TableApplyQueuedRequests")                            TableApplyQueuedRequests                            :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableSetupDrawChannels")                              TableSetupDrawChannels                              :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableReconcileColumns")                               TableReconcileColumns                               :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableUpdateLayout")                                   TableUpdateLayout                                   :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableUpdateBorders")                                  TableUpdateBorders                                  :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableUpdateColumnsWeightFromWidth")                   TableUpdateColumnsWeightFromWidth                   :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableApplyExternalUnclipRect")                        TableApplyExternalUnclipRect                        :: proc(table: ^Table, rect: ^Rect)                                                                                                   ---
+	@(link_name="ImGui_TableDrawBorders")                                    TableDrawBorders                                    :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableDrawDefaultContextMenu")                         TableDrawDefaultContextMenu                         :: proc(table: ^Table, flags_for_section_to_display: TableFlags)                                                                      ---
+	@(link_name="ImGui_TableBeginContextMenuPopup")                          TableBeginContextMenuPopup                          :: proc(table: ^Table) -> bool                                                                                                        ---
+	@(link_name="ImGui_TableMergeDrawChannels")                              TableMergeDrawChannels                              :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableGetInstanceData")                                TableGetInstanceData                                :: proc(table: ^Table, instance_no: i32) -> ^TableInstanceData                                                                        ---
+	@(link_name="ImGui_TableGetInstanceID")                                  TableGetInstanceID                                  :: proc(table: ^Table, instance_no: i32) -> ID                                                                                        ---
+	@(link_name="ImGui_TableFixDisplayOrder")                                TableFixDisplayOrder                                :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableSortSpecsSanitize")                              TableSortSpecsSanitize                              :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableSortSpecsBuild")                                 TableSortSpecsBuild                                 :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableInitColumnDefaults")                             TableInitColumnDefaults                             :: proc(table: ^Table, column: ^TableColumn, init_mask: TableColumnFlags)                                                             ---
+	@(link_name="ImGui_TableGetColumnNextSortDirection")                     TableGetColumnNextSortDirection                     :: proc(column: ^TableColumn) -> SortDirection                                                                                        ---
+	@(link_name="ImGui_TableFixColumnSortDirection")                         TableFixColumnSortDirection                         :: proc(table: ^Table, column: ^TableColumn)                                                                                          ---
+	@(link_name="ImGui_TableGetColumnWidthAuto")                             TableGetColumnWidthAuto                             :: proc(table: ^Table, column: ^TableColumn) -> f32                                                                                   ---
+	@(link_name="ImGui_TableBeginRow")                                       TableBeginRow                                       :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableEndRow")                                         TableEndRow                                         :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableBeginCell")                                      TableBeginCell                                      :: proc(table: ^Table, column_n: i32)                                                                                                 ---
+	@(link_name="ImGui_TableEndCell")                                        TableEndCell                                        :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableGetCellBgRect")                                  TableGetCellBgRect                                  :: proc(table: ^Table, column_n: i32) -> Rect                                                                                         ---
+	@(link_name="ImGui_TableGetColumnNameImGuiTablePtr")                     TableGetColumnNameImGuiTablePtr                     :: proc(table: ^Table, column_n: i32) -> cstring                                                                                      ---
+	@(link_name="ImGui_TableGetColumnResizeID")                              TableGetColumnResizeID                              :: proc(table: ^Table, column_n: i32, instance_no: i32 = 0) -> ID                                                                     ---
+	@(link_name="ImGui_TableCalcMaxColumnWidth")                             TableCalcMaxColumnWidth                             :: proc(table: ^Table, column_n: i32) -> f32                                                                                          ---
+	@(link_name="ImGui_TableSetColumnWidthAutoSingle")                       TableSetColumnWidthAutoSingle                       :: proc(table: ^Table, column_n: i32)                                                                                                 ---
+	@(link_name="ImGui_TableSetColumnWidthAutoAll")                          TableSetColumnWidthAutoAll                          :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableSetColumnDisplayOrder")                          TableSetColumnDisplayOrder                          :: proc(table: ^Table, column_n: i32, dst_order: i32)                                                                                 ---
+	@(link_name="ImGui_TableQueueSetColumnDisplayOrder")                     TableQueueSetColumnDisplayOrder                     :: proc(table: ^Table, column_n: i32, dst_order: i32)                                                                                 ---
+	@(link_name="ImGui_TableRemove")                                         TableRemove                                         :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableGcCompactTransientBuffers")                      TableGcCompactTransientBuffers                      :: proc(table: ^Table)                                                                                                                ---
+	@(link_name="ImGui_TableGcCompactTransientBuffersImGuiTableTempDataPtr") TableGcCompactTransientBuffersImGuiTableTempDataPtr :: proc(table: ^TableTempData)                                                                                                        ---
+	@(link_name="ImGui_TableGcCompactSettings")                              TableGcCompactSettings                              :: proc()                                                                                                                             ---
+	// Tables: Settings
+	@(link_name="ImGui_TableLoadSettings")               TableLoadSettings               :: proc(table: ^Table)                                                                       ---
+	@(link_name="ImGui_TableLoadSettingsForColumns")     TableLoadSettingsForColumns     :: proc(table: ^Table)                                                                       ---
+	@(link_name="ImGui_TableLoadSettingsForColumn")      TableLoadSettingsForColumn      :: proc(column: ^TableColumn, column_settings: ^TableColumnSettings, load_flags: TableFlags) ---
+	@(link_name="ImGui_TableSaveSettings")               TableSaveSettings               :: proc(table: ^Table)                                                                       ---
+	@(link_name="ImGui_TableResetSettings")              TableResetSettings              :: proc(table: ^Table)                                                                       ---
+	@(link_name="ImGui_TableGetBoundSettings")           TableGetBoundSettings           :: proc(table: ^Table) -> ^TableSettings                                                     ---
+	@(link_name="ImGui_TableSettingsAddSettingsHandler") TableSettingsAddSettingsHandler :: proc()                                                                                    ---
+	@(link_name="ImGui_TableSettingsCreate")             TableSettingsCreate             :: proc(id: ID, columns_count: i32) -> ^TableSettings                                        ---
+	@(link_name="ImGui_TableSettingsFindByID")           TableSettingsFindByID           :: proc(id: ID) -> ^TableSettings                                                            ---
+	// Legacy Columns API (this is not exposed because we will encourage transitioning to the Tables API)
+	@(link_name="ImGui_SetWindowClipRectBeforeSetChannel") SetWindowClipRectBeforeSetChannel :: proc(window: ^Window, clip_rect: Rect)                        ---
+	@(link_name="ImGui_BeginColumns")                      BeginColumns                      :: proc(str_id: cstring, count: i32, flags: OldColumnFlags = {}) --- // setup number of columns. use an identifier to distinguish multiple column sets. close with EndColumns().
+	@(link_name="ImGui_EndColumns")                        EndColumns                        :: proc()                                                        --- // close columns
+	@(link_name="ImGui_PushColumnClipRect")                PushColumnClipRect                :: proc(column_index: i32)                                       ---
+	@(link_name="ImGui_PushColumnsBackground")             PushColumnsBackground             :: proc()                                                        ---
+	@(link_name="ImGui_PopColumnsBackground")              PopColumnsBackground              :: proc()                                                        ---
+	@(link_name="ImGui_GetColumnsID")                      GetColumnsID                      :: proc(str_id: cstring, count: i32) -> ID                       ---
+	@(link_name="ImGui_FindOrCreateColumns")               FindOrCreateColumns               :: proc(window: ^Window, id: ID) -> ^OldColumns                  ---
+	@(link_name="ImGui_GetColumnOffsetFromNorm")           GetColumnOffsetFromNorm           :: proc(columns: ^OldColumns, offset_norm: f32) -> f32           ---
+	@(link_name="ImGui_GetColumnNormFromOffset")           GetColumnNormFromOffset           :: proc(columns: ^OldColumns, offset: f32) -> f32                ---
 	// Windows
 	// We should always have a CurrentWindow in the stack (there is an implicit "Debug" window)
 	// If this ever crashes because g.CurrentWindow is NULL, it means that either:
@@ -2716,6 +2864,7 @@ foreign lib {
 	@(link_name="ImGui_MarkIniSettingsDirty")               MarkIniSettingsDirty               :: proc()                                       ---
 	@(link_name="ImGui_MarkIniSettingsDirtyImGuiWindowPtr") MarkIniSettingsDirtyImGuiWindowPtr :: proc(window: ^Window)                        ---
 	@(link_name="ImGui_ClearIniSettings")                   ClearIniSettings                   :: proc()                                       ---
+	@(link_name="ImGui_CleanupIniSettings")                 CleanupIniSettings                 :: proc(args: ^SettingsCleanupArgs)             --- // [BETA] Expected to turn into a public API. Please report if you are using this!
 	@(link_name="ImGui_AddSettingsHandler")                 AddSettingsHandler                 :: proc(handler: ^SettingsHandler)              ---
 	@(link_name="ImGui_RemoveSettingsHandler")              RemoveSettingsHandler              :: proc(type_name: cstring)                     ---
 	@(link_name="ImGui_FindSettingsHandler")                FindSettingsHandler                :: proc(type_name: cstring) -> ^SettingsHandler ---
@@ -2780,7 +2929,7 @@ foreign lib {
 	// Popups, Modals
 	@(link_name="ImGui_BeginPopupEx")                   BeginPopupEx                   :: proc(id: ID, extra_window_flags: WindowFlags) -> bool                                                              ---
 	@(link_name="ImGui_BeginPopupMenuEx")               BeginPopupMenuEx               :: proc(id: ID, label: cstring, extra_window_flags: WindowFlags) -> bool                                              ---
-	@(link_name="ImGui_OpenPopupEx")                    OpenPopupEx                    :: proc(id: ID, popup_flags: PopupFlags)                                                                              ---
+	@(link_name="ImGui_OpenPopupEx")                    OpenPopupEx                    :: proc(id: ID, popup_flags: PopupFlags) -> bool                                                                      ---
 	@(link_name="ImGui_ClosePopupToLevel")              ClosePopupToLevel              :: proc(remaining: i32, restore_focus_to_window_under_popup: bool)                                                    ---
 	@(link_name="ImGui_ClosePopupsOverWindow")          ClosePopupsOverWindow          :: proc(ref_window: ^Window, restore_focus_to_window_under_popup: bool)                                               ---
 	@(link_name="ImGui_ClosePopupsExceptModals")        ClosePopupsExceptModals        :: proc()                                                                                                             ---
@@ -2986,81 +3135,11 @@ foreign lib {
 	@(link_name="ImGui_EndBoxSelect")   EndBoxSelect   :: proc(scope_rect: Rect, ms_flags: MultiSelectFlags)                                             ---
 	// Multi-Select API
 	@(link_name="ImGui_MultiSelectItemHeader")  MultiSelectItemHeader  :: proc(id: ID, p_selected: ^bool, p_button_flags: ^ButtonFlags)                                                               ---
-	@(link_name="ImGui_MultiSelectItemFooter")  MultiSelectItemFooter  :: proc(id: ID, p_selected: ^bool, p_pressed: ^bool)                                                                           ---
+	@(link_name="ImGui_MultiSelectItemFooter")  MultiSelectItemFooter  :: proc(id: ID, p_selected: ^bool, p_pressed: ^bool, extra_flags: MultiSelectFlags = {})                                       ---
 	@(link_name="ImGui_MultiSelectAddSetAll")   MultiSelectAddSetAll   :: proc(ms: ^MultiSelectTempData, selected: bool)                                                                              ---
 	@(link_name="ImGui_MultiSelectAddSetRange") MultiSelectAddSetRange :: proc(ms: ^MultiSelectTempData, selected: bool, range_dir: i32, first_item: SelectionUserData, last_item: SelectionUserData) ---
 	@(link_name="ImGui_GetBoxSelectState")      GetBoxSelectState      :: proc(id: ID) -> ^BoxSelectState                                                                                             ---
 	@(link_name="ImGui_GetMultiSelectState")    GetMultiSelectState    :: proc(id: ID) -> ^MultiSelectState                                                                                           ---
-	// Internal Columns API (this is not exposed because we will encourage transitioning to the Tables API)
-	@(link_name="ImGui_SetWindowClipRectBeforeSetChannel") SetWindowClipRectBeforeSetChannel :: proc(window: ^Window, clip_rect: Rect)                        ---
-	@(link_name="ImGui_BeginColumns")                      BeginColumns                      :: proc(str_id: cstring, count: i32, flags: OldColumnFlags = {}) --- // setup number of columns. use an identifier to distinguish multiple column sets. close with EndColumns().
-	@(link_name="ImGui_EndColumns")                        EndColumns                        :: proc()                                                        --- // close columns
-	@(link_name="ImGui_PushColumnClipRect")                PushColumnClipRect                :: proc(column_index: i32)                                       ---
-	@(link_name="ImGui_PushColumnsBackground")             PushColumnsBackground             :: proc()                                                        ---
-	@(link_name="ImGui_PopColumnsBackground")              PopColumnsBackground              :: proc()                                                        ---
-	@(link_name="ImGui_GetColumnsID")                      GetColumnsID                      :: proc(str_id: cstring, count: i32) -> ID                       ---
-	@(link_name="ImGui_FindOrCreateColumns")               FindOrCreateColumns               :: proc(window: ^Window, id: ID) -> ^OldColumns                  ---
-	@(link_name="ImGui_GetColumnOffsetFromNorm")           GetColumnOffsetFromNorm           :: proc(columns: ^OldColumns, offset_norm: f32) -> f32           ---
-	@(link_name="ImGui_GetColumnNormFromOffset")           GetColumnNormFromOffset           :: proc(columns: ^OldColumns, offset: f32) -> f32                ---
-	// Tables: Candidates for public API
-	@(link_name="ImGui_TableOpenContextMenu")              TableOpenContextMenu              :: proc(column_n: i32 = -1)                                                                    ---
-	@(link_name="ImGui_TableSetColumnWidth")               TableSetColumnWidth               :: proc(column_n: i32, width: f32)                                                             ---
-	@(link_name="ImGui_TableSetColumnSortDirection")       TableSetColumnSortDirection       :: proc(column_n: i32, sort_direction: SortDirection, append_to_sort_specs: bool)              ---
-	@(link_name="ImGui_TableGetHoveredRow")                TableGetHoveredRow                :: proc() -> i32                                                                               --- // Retrieve *PREVIOUS FRAME* hovered row. This difference with TableGetHoveredColumn() is the reason why this is not public yet.
-	@(link_name="ImGui_TableGetHeaderRowHeight")           TableGetHeaderRowHeight           :: proc() -> f32                                                                               ---
-	@(link_name="ImGui_TableGetHeaderAngledMaxLabelWidth") TableGetHeaderAngledMaxLabelWidth :: proc() -> f32                                                                               ---
-	@(link_name="ImGui_TablePushBackgroundChannel")        TablePushBackgroundChannel        :: proc()                                                                                      ---
-	@(link_name="ImGui_TablePopBackgroundChannel")         TablePopBackgroundChannel         :: proc()                                                                                      ---
-	@(link_name="ImGui_TablePushColumnChannel")            TablePushColumnChannel            :: proc(column_n: i32)                                                                         ---
-	@(link_name="ImGui_TablePopColumnChannel")             TablePopColumnChannel             :: proc()                                                                                      ---
-	@(link_name="ImGui_TableAngledHeadersRowEx")           TableAngledHeadersRowEx           :: proc(row_id: ID, angle: f32, max_label_width: f32, data: ^TableHeaderData, data_count: i32) ---
-	// Tables: Internals
-	@(link_name="ImGui_GetCurrentTable")                                     GetCurrentTable                                     :: proc() -> ^Table                                                                                                                   ---
-	@(link_name="ImGui_TableFindByID")                                       TableFindByID                                       :: proc(id: ID) -> ^Table                                                                                                             ---
-	@(link_name="ImGui_BeginTableWithID")                                    BeginTableWithID                                    :: proc(name: cstring, id: ID, columns_count: i32, flags: TableFlags = {}, outer_size: Vec2 = {0, 0}, inner_width: f32 = 0.0) -> bool ---
-	@(link_name="ImGui_TableBeginInitMemory")                                TableBeginInitMemory                                :: proc(table: ^Table, columns_count: i32)                                                                                            ---
-	@(link_name="ImGui_TableBeginApplyRequests")                             TableBeginApplyRequests                             :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableSetupDrawChannels")                              TableSetupDrawChannels                              :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableUpdateLayout")                                   TableUpdateLayout                                   :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableUpdateBorders")                                  TableUpdateBorders                                  :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableUpdateColumnsWeightFromWidth")                   TableUpdateColumnsWeightFromWidth                   :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableApplyExternalUnclipRect")                        TableApplyExternalUnclipRect                        :: proc(table: ^Table, rect: ^Rect)                                                                                                   ---
-	@(link_name="ImGui_TableDrawBorders")                                    TableDrawBorders                                    :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableDrawDefaultContextMenu")                         TableDrawDefaultContextMenu                         :: proc(table: ^Table, flags_for_section_to_display: TableFlags)                                                                      ---
-	@(link_name="ImGui_TableBeginContextMenuPopup")                          TableBeginContextMenuPopup                          :: proc(table: ^Table) -> bool                                                                                                        ---
-	@(link_name="ImGui_TableMergeDrawChannels")                              TableMergeDrawChannels                              :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableGetInstanceData")                                TableGetInstanceData                                :: proc(table: ^Table, instance_no: i32) -> ^TableInstanceData                                                                        ---
-	@(link_name="ImGui_TableGetInstanceID")                                  TableGetInstanceID                                  :: proc(table: ^Table, instance_no: i32) -> ID                                                                                        ---
-	@(link_name="ImGui_TableFixDisplayOrder")                                TableFixDisplayOrder                                :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableSortSpecsSanitize")                              TableSortSpecsSanitize                              :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableSortSpecsBuild")                                 TableSortSpecsBuild                                 :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableGetColumnNextSortDirection")                     TableGetColumnNextSortDirection                     :: proc(column: ^TableColumn) -> SortDirection                                                                                        ---
-	@(link_name="ImGui_TableFixColumnSortDirection")                         TableFixColumnSortDirection                         :: proc(table: ^Table, column: ^TableColumn)                                                                                          ---
-	@(link_name="ImGui_TableGetColumnWidthAuto")                             TableGetColumnWidthAuto                             :: proc(table: ^Table, column: ^TableColumn) -> f32                                                                                   ---
-	@(link_name="ImGui_TableBeginRow")                                       TableBeginRow                                       :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableEndRow")                                         TableEndRow                                         :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableBeginCell")                                      TableBeginCell                                      :: proc(table: ^Table, column_n: i32)                                                                                                 ---
-	@(link_name="ImGui_TableEndCell")                                        TableEndCell                                        :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableGetCellBgRect")                                  TableGetCellBgRect                                  :: proc(table: ^Table, column_n: i32) -> Rect                                                                                         ---
-	@(link_name="ImGui_TableGetColumnNameImGuiTablePtr")                     TableGetColumnNameImGuiTablePtr                     :: proc(table: ^Table, column_n: i32) -> cstring                                                                                      ---
-	@(link_name="ImGui_TableGetColumnResizeID")                              TableGetColumnResizeID                              :: proc(table: ^Table, column_n: i32, instance_no: i32 = 0) -> ID                                                                     ---
-	@(link_name="ImGui_TableCalcMaxColumnWidth")                             TableCalcMaxColumnWidth                             :: proc(table: ^Table, column_n: i32) -> f32                                                                                          ---
-	@(link_name="ImGui_TableSetColumnWidthAutoSingle")                       TableSetColumnWidthAutoSingle                       :: proc(table: ^Table, column_n: i32)                                                                                                 ---
-	@(link_name="ImGui_TableSetColumnWidthAutoAll")                          TableSetColumnWidthAutoAll                          :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableSetColumnDisplayOrder")                          TableSetColumnDisplayOrder                          :: proc(table: ^Table, column_n: i32, dst_order: i32)                                                                                 ---
-	@(link_name="ImGui_TableQueueSetColumnDisplayOrder")                     TableQueueSetColumnDisplayOrder                     :: proc(table: ^Table, column_n: i32, dst_order: i32)                                                                                 ---
-	@(link_name="ImGui_TableRemove")                                         TableRemove                                         :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableGcCompactTransientBuffers")                      TableGcCompactTransientBuffers                      :: proc(table: ^Table)                                                                                                                ---
-	@(link_name="ImGui_TableGcCompactTransientBuffersImGuiTableTempDataPtr") TableGcCompactTransientBuffersImGuiTableTempDataPtr :: proc(table: ^TableTempData)                                                                                                        ---
-	@(link_name="ImGui_TableGcCompactSettings")                              TableGcCompactSettings                              :: proc()                                                                                                                             ---
-	// Tables: Settings
-	@(link_name="ImGui_TableLoadSettings")               TableLoadSettings               :: proc(table: ^Table)                                ---
-	@(link_name="ImGui_TableSaveSettings")               TableSaveSettings               :: proc(table: ^Table)                                ---
-	@(link_name="ImGui_TableResetSettings")              TableResetSettings              :: proc(table: ^Table)                                ---
-	@(link_name="ImGui_TableGetBoundSettings")           TableGetBoundSettings           :: proc(table: ^Table) -> ^TableSettings              ---
-	@(link_name="ImGui_TableSettingsAddSettingsHandler") TableSettingsAddSettingsHandler :: proc()                                             ---
-	@(link_name="ImGui_TableSettingsCreate")             TableSettingsCreate             :: proc(id: ID, columns_count: i32) -> ^TableSettings ---
-	@(link_name="ImGui_TableSettingsFindByID")           TableSettingsFindByID           :: proc(id: ID) -> ^TableSettings                     ---
 	// Tab Bars
 	@(link_name="ImGui_GetCurrentTabBar")                                 GetCurrentTabBar                                 :: proc() -> ^TabBar                                                                                                                                                                                           ---
 	@(link_name="ImGui_TabBarFindByID")                                   TabBarFindByID                                   :: proc(id: ID) -> ^TabBar                                                                                                                                                                                     ---
@@ -3098,7 +3177,7 @@ foreign lib {
 	@(link_name="ImGui_RenderFrameBorder")                    RenderFrameBorder                    :: proc(p_min: Vec2, p_max: Vec2, rounding: f32 = 0.0)                                                                                                                 ---
 	@(link_name="ImGui_RenderColorComponentMarker")           RenderColorComponentMarker           :: proc(bb: Rect, col: u32, rounding: f32)                                                                                                                             ---
 	@(link_name="ImGui_RenderColorRectWithAlphaCheckerboard") RenderColorRectWithAlphaCheckerboard :: proc(draw_list: ^DrawList, p_min: Vec2, p_max: Vec2, fill_col: u32, grid_step: f32, grid_off: Vec2, rounding: f32 = 0.0, flags: DrawFlags = {})                     ---
-	@(link_name="ImGui_RenderNavCursor")                      RenderNavCursor                      :: proc(bb: Rect, id: ID, flags: NavRenderCursorFlags)                                                                                                                 --- // Navigation highlight
+	@(link_name="ImGui_RenderNavCursor")                      RenderNavCursor                      :: proc(bb: Rect, id: ID, flags: NavRenderCursorFlags, rounding: f32 = -1.0)                                                                                           --- // Navigation highlight
 	@(link_name="ImGui_FindRenderedTextEnd")                  FindRenderedTextEnd                  :: proc(text: cstring, text_end: cstring = nil) -> cstring                                                                                                             --- // Find the optional ## from which we stop displaying text.
 	@(link_name="ImGui_RenderMouseCursor")                    RenderMouseCursor                    :: proc(pos: Vec2, scale: f32, mouse_cursor: MouseCursor, col_fill: u32, col_border: u32, col_shadow: u32)                                                             ---
 	// Render helpers (those functions don't access any ImGui state!)
@@ -3212,7 +3291,7 @@ foreign lib {
 	@(link_name="ImGui_DebugNodeStorage")                       DebugNodeStorage                             :: proc(storage: ^Storage, label: cstring)                                                                                                                   ---
 	@(link_name="ImGui_DebugNodeTabBar")                        DebugNodeTabBar                              :: proc(tab_bar: ^TabBar, label: cstring)                                                                                                                    ---
 	@(link_name="ImGui_DebugNodeTable")                         DebugNodeTable                               :: proc(table: ^Table)                                                                                                                                       ---
-	@(link_name="ImGui_DebugNodeTableSettings")                 DebugNodeTableSettings                       :: proc(settings: ^TableSettings)                                                                                                                            ---
+	@(link_name="ImGui_DebugNodeTableSettings")                 DebugNodeTableSettings                       :: proc(settings: ^TableSettings, table: ^Table)                                                                                                             ---
 	@(link_name="ImGui_DebugNodeInputTextState")                DebugNodeInputTextState                      :: proc(state: ^InputTextState)                                                                                                                              ---
 	@(link_name="ImGui_DebugNodeTypingSelectState")             DebugNodeTypingSelectState                   :: proc(state: ^TypingSelectState)                                                                                                                           ---
 	@(link_name="ImGui_DebugNodeMultiSelectState")              DebugNodeMultiSelectState                    :: proc(state: ^MultiSelectState)                                                                                                                            ---
@@ -3278,6 +3357,7 @@ foreign lib {
 	@(link_name="cImFontAtlasTextureBlockFill")                 cImFontAtlasTextureBlockFill                 :: proc(dst_tex: ^TextureData, dst_x: i32, dst_y: i32, w: i32, h: i32, col: u32)                                                                             ---
 	@(link_name="cImFontAtlasTextureBlockCopy")                 cImFontAtlasTextureBlockCopy                 :: proc(src_tex: ^TextureData, src_x: i32, src_y: i32, dst_tex: ^TextureData, dst_x: i32, dst_y: i32, w: i32, h: i32)                                        ---
 	@(link_name="cImFontAtlasTextureBlockQueueUpload")          cImFontAtlasTextureBlockQueueUpload          :: proc(atlas: ^FontAtlas, tex: ^TextureData, x: i32, y: i32, w: i32, h: i32)                                                                                ---
+	@(link_name="cImTextureDataUpdateNewFrame")                 cImTextureDataUpdateNewFrame                 :: proc(tex: ^TextureData) -> bool                                                                                                                           ---
 	@(link_name="cImTextureDataQueueUpload")                    cImTextureDataQueueUpload                    :: proc(tex: ^TextureData, x: i32, y: i32, w: i32, h: i32)                                                                                                   ---
 	@(link_name="cImTextureDataGetFormatBytesPerPixel")         cImTextureDataGetFormatBytesPerPixel         :: proc(format: TextureFormat) -> i32                                                                                                                        ---
 	@(link_name="cImTextureDataGetStatusName")                  cImTextureDataGetStatusName                  :: proc(status: TextureStatus) -> cstring                                                                                                                    ---

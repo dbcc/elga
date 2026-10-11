@@ -85,7 +85,7 @@ NewFrame :: proc() {
 
 RenderDrawData :: proc(draw_data: ^imgui.DrawData, pass_encoder: wgpu.RenderPassEncoder) {
 	fb := draw_data.DisplaySize * draw_data.FramebufferScale
-	if fb.x <= 0 || fb.y <= 0 || draw_data.CmdListsCount == 0 {
+	if fb.x <= 0 || fb.y <= 0 || draw_data.CmdLists.Size == 0 {
 		return
 	}
 
@@ -135,7 +135,7 @@ RenderDrawData :: proc(draw_data: ^imgui.DrawData, pass_encoder: wgpu.RenderPass
 	vtx_dst := fr.vertexBufferHost[:]
 	idx_dst := fr.indexBufferHost[:]
 	vtx_dst_off, idx_dst_off: int
-	for n in 0..<draw_data.CmdListsCount {
+	for n in 0..<draw_data.CmdLists.Size {
 		draw_list := (cast([^]^imgui.DrawList)draw_data.CmdLists.Data)[n]
 		vtx_dst_off += copy(vtx_dst[vtx_dst_off:], (cast([^]imgui.DrawVert)draw_list.VtxBuffer.Data)[:draw_list.VtxBuffer.Size])
 		idx_dst_off += copy(idx_dst[idx_dst_off:], (cast([^]imgui.DrawIdx)draw_list.IdxBuffer.Data)[:draw_list.IdxBuffer.Size])
@@ -151,7 +151,7 @@ RenderDrawData :: proc(draw_data: ^imgui.DrawData, pass_encoder: wgpu.RenderPass
 	global_idx_offset: u32 = 0
 	clip_scale := draw_data.FramebufferScale
 	clip_off   := draw_data.DisplayPos
-	for n in 0..<draw_data.CmdListsCount {
+	for n in 0..<draw_data.CmdLists.Size {
 		draw_list := (cast([^]^imgui.DrawList)draw_data.CmdLists.Data)[n]
 		for cmd_i in 0..<draw_list.CmdBuffer.Size {
 			pcmd := &(cast([^]imgui.DrawCmd)draw_list.CmdBuffer.Data)[cmd_i]

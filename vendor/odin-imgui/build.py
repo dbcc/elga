@@ -17,7 +17,7 @@ import random
 # @CONFIGURE: Should be a valid dear imgui tag or hash.
 # Note that if this is changed, that you will also have to acquire dear_bindings .json files for the same version:
 # https://github.com/dearimgui/dear_bindings/releases
-imgui_version = "v1.92.8-docking"
+imgui_version = "v1.92.9b-docking"
 
 # Note - tested with Odin version `dev-2026-07`
 

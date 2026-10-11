@@ -714,6 +714,9 @@ def write_enum_as_constants(file, enum, enum_field_prefix, name):
 		field_base_name = element["name"]
 		field_name = enum_parse_field_name(field_base_name, enum_field_prefix)
 		field_value = element["value_expression"]
+		# Odin cannot apply ~ to an untyped constant (e.g. ImDrawFlags_InvalidMask_ = ~0x7FFFFFF0
+		# since 1.92.9). Use dear_bindings' evaluated value instead.
+		if field_value.startswith("~") and "value" in element: field_value = str(element["value"])
 
 		is_enum_list = "|" in field_value # "ImBla | ImOtherThing | ImFoo"
 
