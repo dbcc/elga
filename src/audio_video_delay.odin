@@ -22,7 +22,7 @@ audio_reset_video_delay :: proc(a: ^Audio_State) {
 }
 
 audio_set_video_delay :: proc(a: ^Audio_State, delay_100ns: i64) {
-	frames := u32(clamp(delay_100ns*AUDIO_SAMPLE_RATE/10_000_000, 0, AUDIO_VIDEO_DELAY_MAX))
+	frames := u32(clamp(delay_100ns*AUDIO_SAMPLE_RATE/VIDEO_TICKS_PER_SECOND, 0, AUDIO_VIDEO_DELAY_MAX))
 	sync.atomic_store_explicit(&a.video_delay.requested, frames, .Release)
 }
 

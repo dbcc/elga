@@ -119,7 +119,7 @@ main :: proc() {
 	if !renderer_init(&app.renderer, hwnd, u32(client.right), u32(client.bottom)) do fatal("D3D11 initialization failed")
 	if !imgui_ui_init(&app.ui, &app.renderer) do fatal("Dear ImGui DX11 initialization failed")
 	audio_init(&app.audio)
-	video_enhancements_init(&app.renderer.enhancements)
+	video_enhancements_init(&app.renderer.enhancements, &app.audio)
 	wake_init(&app.wake)
 	win32.SetTimer(hwnd, UI_TIMER, 100, nil)
 

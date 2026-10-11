@@ -3,17 +3,21 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
-import "core:strings"
 import "core:sync"
 import win32 "core:sys/windows"
 import d3d11 "vendor:directx/d3d11"
 import dxgi "vendor:directx/dxgi"
 
 VIDEO_ENHANCEMENT_MESSAGE :: win32.WM_APP + 6
+VIDEO_SETTINGS_FILE :: "elga-video.ini"
 VIDEO_BACKEND_ABI :: 3
 VIDEO_VSR :: 1
 VIDEO_FRUC :: 2
+// Media Foundation timestamps, the add-on ABI, and video_now use 100 ns ticks.
+VIDEO_TICKS_PER_SECOND :: 10_000_000
+VIDEO_TICKS_PER_MS     :: VIDEO_TICKS_PER_SECOND/1000
 
+// The C ABI mirrors native/video/video_api.h; keep field order and sizes in sync.
 Video_Effect_State :: enum u32 { Off, Starting, Active, Not_Needed, Unavailable, Paused }
 Video_Effect_Reason :: enum u32 { None, Runtime, Adapter, SDK, Display, Size, Late, Reset, Device }
 Video_Config :: struct {
@@ -59,6 +63,8 @@ Video_Preference :: enum { Super_Resolution, Frame_Generation, Game_30_FPS }
 Video_Enhancements :: struct {
 	preferences: Video_Preferences,
 	loaded, load_attempted, save_failed: bool,
+	// The audio monitor that receives the matching delay, if any.
+	audio: ^Audio_State,
 	module: win32.HMODULE,
 	api: Video_API,
 	session: rawptr,
@@ -94,55 +100,55 @@ video_now :: proc() -> i64 {
 	q, f: win32.LARGE_INTEGER
 	win32.QueryPerformanceCounter(&q)
 	win32.QueryPerformanceFrequency(&f)
-	return i64(q/f*10_000_000 + q%f*10_000_000/f)
+	return i64(q/f*VIDEO_TICKS_PER_SECOND + q%f*VIDEO_TICKS_PER_SECOND/f)
 }
 
-video_preferences_parse :: proc(data: string) -> Video_Preferences {
-	p: Video_Preferences
-	section := false
-	remaining := data
-	for raw_line in strings.split_lines_iterator(&remaining) {
-		line := strings.trim_space(raw_line)
-		if strings.has_prefix(line, "[") { section = line == "[video]"; continue }
-		if !section do continue
-		separator := strings.index_byte(line, '=')
-		if separator < 0 do continue
-		key, value := line[:separator], line[separator+1:]
-		key, value = strings.trim_space(key), strings.trim_space(value)
+// Only an exact "1" enables a preference; anything else leaves it off.
+video_preferences_parse :: proc(data: string) -> (p: Video_Preferences) {
+	it := Ini_Iterator{data = data, section = "[video]"}
+	for key, value in ini_next(&it) {
 		switch key {
 		case "super_resolution": p.super_resolution = value == "1"
 		case "frame_generation": p.frame_generation = value == "1"
-		case "game_30_fps": p.game_30_fps = value == "1"
+		case "game_30_fps":      p.game_30_fps = value == "1"
 		}
 	}
-	return p
-}
-
-video_preferences_paths :: proc() -> (path, temporary: string, ok: bool) {
-	directory, err := os.get_executable_directory(context.temp_allocator)
-	if err != nil do return
-	settings_path, path_err := filepath.join([]string{directory, "elga-video.ini"}, context.temp_allocator)
-	temp_path, temp_err := filepath.join([]string{directory, fmt.aprintf("elga-video.ini.%d.tmp", os.get_pid(), allocator = context.temp_allocator)}, context.temp_allocator)
-	return settings_path, temp_path, path_err == nil && temp_err == nil
+	return
 }
 
 video_preferences_save_to :: proc(p: Video_Preferences, path, temporary: string) -> bool {
 	buffer: [128]byte
 	data := fmt.bprintf(buffer[:], "[video]\r\nsuper_resolution=%d\r\nframe_generation=%d\r\ngame_30_fps=%d\r\n", int(p.super_resolution), int(p.frame_generation), int(p.game_30_fps))
-	if os.write_entire_file(temporary, data) != nil do return false
-	if os.rename(temporary, path) != nil { _ = os.remove(temporary); return false }
-	return true
+	return settings_write(path, temporary, data)
 }
 
-video_enhancements_init :: proc(e: ^Video_Enhancements) {
+video_enhancements_init :: proc(e: ^Video_Enhancements, audio: ^Audio_State) {
+	e.audio = audio
 	e.diagnostics = os.get_env("ELGA_VIDEO_DIAGNOSTICS", context.temp_allocator) == "1"
-	path, _, ok := video_preferences_paths()
-	if ok {
-		data, read_ok := os.read_entire_file(path, context.temp_allocator)
-		if read_ok == nil do e.preferences = video_preferences_parse(string(data))
+	if path, _, ok := settings_paths(VIDEO_SETTINGS_FILE); ok {
+		data, read_error := os.read_entire_file(path, context.temp_allocator)
+		if read_error == nil do e.preferences = video_preferences_parse(string(data))
 	}
-	e.status.vsr_state = .Starting if e.preferences.super_resolution else .Off
-	e.status.fruc_state = .Starting if e.preferences.frame_generation else .Off
+	video_status_set(e, .Starting)
+}
+
+// Shows each enabled effect in state and each disabled one as Off.
+video_status_set :: proc(e: ^Video_Enhancements, state: Video_Effect_State, vsr_reason := Video_Effect_Reason.None, fruc_reason := Video_Effect_Reason.None) {
+	e.status.vsr_state = state if e.preferences.super_resolution else .Off
+	e.status.fruc_state = state if e.preferences.frame_generation else .Off
+	e.status.vsr_reason, e.status.fruc_reason = vsr_reason, fruc_reason
+}
+
+// Clears worker status for a new configuration. Enabled effects start over.
+video_status_restart :: proc(e: ^Video_Enhancements) {
+	e.status = {}
+	e.history = 0
+	video_status_set(e, .Starting)
+}
+
+// Discards any delayed audio along with the enhanced video it matched.
+video_enhancements_reset_audio :: proc(e: ^Video_Enhancements) {
+	if e.audio != nil do audio_reset_video_delay(e.audio)
 }
 
 video_backend_valid :: proc(api: Video_API) -> bool {
@@ -181,7 +187,7 @@ video_enhancements_toggle :: proc(r: ^Renderer, preference: Video_Preference) {
 	case .Game_30_FPS: e.preferences.game_30_fps = !e.preferences.game_30_fps
 	}
 	e.retry += 1
-	path, temporary, ok := video_preferences_paths()
+	path, temporary, ok := settings_paths(VIDEO_SETTINGS_FILE)
 	e.save_failed = !ok || !video_preferences_save_to(e.preferences, path, temporary)
 	video_enhancements_reset(r)
 	if !e.loaded do e.load_attempted = false
@@ -205,18 +211,21 @@ video_enhancements_reset :: proc(r: ^Renderer) {
 	e.config = {}
 	e.generation += 1
 	e.submitted_sequence = 0
-	e.status = {}
-	e.history = 0
 	e.output_failed = false
-	e.status.vsr_state = .Starting if e.preferences.super_resolution else .Off
-	e.status.fruc_state = .Starting if e.preferences.frame_generation else .Off
+	video_status_restart(e)
 	e.original_fps, e.generated_fps = 0, 0
 	e.rate_start = 0
 	e.rate_original, e.rate_generated = e.original_presented, e.generated_presented
 	if e.timer != nil do CancelWaitableTimer(e.timer)
 	if e.timer != nil && !e.preferences.frame_generation { win32.CloseHandle(e.timer); e.timer = nil }
 	if e.session != nil { disabled := Video_Config{generation = e.generation, retry = e.retry}; e.api.configure(e.session, &disabled) }
-	if r == &app.renderer do audio_reset_video_delay(&app.audio)
+	video_enhancements_reset_audio(e)
+}
+
+// Stops processing and shows enabled effects as paused for reason.
+video_enhancements_pause :: proc(r: ^Renderer, reason: Video_Effect_Reason) {
+	video_enhancements_reset(r)
+	video_status_set(&r.enhancements, .Paused, reason, reason)
 }
 
 video_enhancements_destroy :: proc(r: ^Renderer) {
@@ -248,17 +257,19 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 	if e.stalled || e.output_failed do return
 	video_backend_load(r)
 	if !e.loaded || e.caps.supported&requested == 0 {
-		e.status.vsr_state = .Unavailable if e.preferences.super_resolution else .Off
-		e.status.fruc_state = .Unavailable if e.preferences.frame_generation else .Off
-		e.status.vsr_reason, e.status.fruc_reason = e.caps.vsr_reason, e.caps.fruc_reason
+		video_status_set(e, .Unavailable, e.caps.vsr_reason, e.caps.fruc_reason)
 		return
 	}
 	if e.session == nil {
 		e.session = e.api.create(r.device_11, r.hwnd, VIDEO_ENHANCEMENT_MESSAGE)
-		if e.session == nil { e.status.vsr_state, e.status.fruc_state = .Paused, .Paused; e.status.vsr_reason, e.status.fruc_reason = .Device, .Device; return }
+		if e.session == nil {
+			video_status_set(e, .Paused, .Device, .Device)
+			return
+		}
 	}
 	if e.preferences.frame_generation && e.timer == nil {
-		e.timer = win32.CreateWaitableTimerExW(nil, nil, 2, win32.TIMER_ALL_ACCESS)
+		// High-resolution timers need Windows 10 1803; fall back to a standard one.
+		e.timer = win32.CreateWaitableTimerExW(nil, nil, win32.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, win32.TIMER_ALL_ACCESS)
 		if e.timer == nil do e.timer = win32.CreateWaitableTimerExW(nil, nil, 0, win32.TIMER_ALL_ACCESS)
 	}
 	if e.timer == nil && requested&VIDEO_FRUC != 0 {
@@ -267,7 +278,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 	}
 	view := video_viewport(r.width, r.height, r.video_top_inset)
 	now := video_now()
-	if e.refresh_checked == 0 || now-e.refresh_checked >= 10_000_000 {
+	if e.refresh_checked == 0 || now-e.refresh_checked >= VIDEO_TICKS_PER_SECOND {
 		e.refresh_hz = video_display_refresh(r)
 		e.refresh_checked = now
 	}
@@ -294,11 +305,8 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 		config.generation = e.generation
 		e.config, e.capture_generation = config, capture_generation
 		e.submitted_sequence = 0
-		e.status = {}
-		e.history = 0
-		e.status.vsr_state = .Starting if e.preferences.super_resolution else .Off
-		e.status.fruc_state = .Starting if e.preferences.frame_generation else .Off
-		if r == &app.renderer do audio_reset_video_delay(&app.audio)
+		video_status_restart(e)
+		video_enhancements_reset_audio(e)
 		e.api.configure(e.session, &config)
 	}
 	output: Video_Output
@@ -306,7 +314,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 	if e.history != e.status.history {
 		e.history = e.status.history
 		video_enhancements_clear_cache(r)
-		if r == &app.renderer do audio_reset_video_delay(&app.audio)
+		video_enhancements_reset_audio(e)
 	}
 	if has_output {
 		defer e.api.release(e.session, output.token)
@@ -331,11 +339,8 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 			} else {
 				// A failed presentation texture must not leave delayed audio playing
 				// alongside the native, undelayed fallback video.
-				video_enhancements_reset(r)
+				video_enhancements_pause(r, .Device)
 				e.output_failed = true
-				e.status.vsr_state = .Paused if e.preferences.super_resolution else .Off
-				e.status.fruc_state = .Paused if e.preferences.frame_generation else .Off
-				e.status.vsr_reason, e.status.fruc_reason = .Device, .Device
 				return
 			}
 		}
@@ -348,28 +353,27 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 	}
 	if e.status.vsr_state != .Active && e.status.fruc_state != .Active do video_enhancements_clear_cache(r)
 	if e.timer == nil && e.preferences.frame_generation do e.status.fruc_state, e.status.fruc_reason = .Paused, .Device
-	if e.rate_start != 0 && now-e.rate_start >= 10_000_000 {
+	// No enhanced presentation for a second: report zero rather than a stale rate.
+	if e.rate_start != 0 && now-e.rate_start >= VIDEO_TICKS_PER_SECOND {
 		e.original_fps, e.generated_fps = 0, 0
 		e.rate_start = now
 		e.rate_original, e.rate_generated = e.original_presented, e.generated_presented
 	}
-	if r == &app.renderer do audio_set_video_delay(&app.audio, e.status.delay)
+	if e.audio != nil do audio_set_video_delay(e.audio, e.status.delay)
 }
 
 video_enhancements_health_tick :: proc(r: ^Renderer) {
 	e := &r.enhancements
 	if e.session == nil do return
-	if e.diagnostics && video_now()-e.diagnostic_time >= 20_000_000 {
+	if e.diagnostics && video_now()-e.diagnostic_time >= 2*VIDEO_TICKS_PER_SECOND {
 		e.diagnostic_time = video_now()
 		totals := capture_health_totals(&r.health)
-		fmt.eprintf("Video timing: capture=%.2f display=%.2f original=%.2f generated=%.2f worker=%.2fms missed=%d history=%d submitted=%d produced=%d capture_drops=%d FG=%v/%v delay=%.2fms\n", r.health.capture_fps, e.refresh_hz, e.original_fps, e.generated_fps, e.status.processing_ms, e.status.missed, e.status.history, e.status.submitted, e.status.produced, totals.busy_drops, e.status.fruc_state, e.status.fruc_reason, f64(e.status.delay)/10000)
+		fmt.eprintf("Video timing: capture=%.2f display=%.2f original=%.2f generated=%.2f worker=%.2fms missed=%d history=%d submitted=%d produced=%d capture_drops=%d FG=%v/%v delay=%.2fms\n", r.health.capture_fps, e.refresh_hz, e.original_fps, e.generated_fps, e.status.processing_ms, e.status.missed, e.status.history, e.status.submitted, e.status.produced, totals.busy_drops, e.status.fruc_state, e.status.fruc_reason, f64(e.status.delay)/VIDEO_TICKS_PER_MS)
 	}
+	// A capture stall pauses processing; it restarts once frames resume.
 	if r.health.capture_stalled && !e.stalled {
-		video_enhancements_reset(r)
+		video_enhancements_pause(r, .Reset)
 		e.stalled = true
-		e.status.vsr_state = .Paused if e.preferences.super_resolution else .Off
-		e.status.fruc_state = .Paused if e.preferences.frame_generation else .Off
-		e.status.vsr_reason, e.status.fruc_reason = .Reset, .Reset
 	} else if !r.health.capture_stalled && e.stalled {
 		e.stalled = false
 		renderer_request_redraw(r)
@@ -416,9 +420,9 @@ video_enhancements_presented :: proc(r: ^Renderer) {
 	if e.cached.generated != 0 { e.generated_presented += 1 } else { e.original_presented += 1 }
 	now := video_now()
 	if e.rate_start == 0 do e.rate_start = now
-	if now-e.rate_start >= 5_000_000 {
-		e.original_fps = f64(e.original_presented-e.rate_original)*10_000_000/f64(now-e.rate_start)
-		e.generated_fps = f64(e.generated_presented-e.rate_generated)*10_000_000/f64(now-e.rate_start)
+	if now-e.rate_start >= VIDEO_TICKS_PER_SECOND/2 {
+		e.original_fps = f64(e.original_presented-e.rate_original)*VIDEO_TICKS_PER_SECOND/f64(now-e.rate_start)
+		e.generated_fps = f64(e.generated_presented-e.rate_generated)*VIDEO_TICKS_PER_SECOND/f64(now-e.rate_start)
 		e.rate_original, e.rate_generated, e.rate_start = e.original_presented, e.generated_presented, now
 	}
 }

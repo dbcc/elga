@@ -426,7 +426,7 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 	if e.preferences.super_resolution || e.preferences.frame_generation {
 		if e.status.fruc_state == .Active do imgui.TextUnformatted(fmt.ctprintf("Source cadence: %.2f FPS (%s)", e.status.source_hz, "30 FPS override" if e.preferences.game_30_fps else "automatic"))
 		imgui.TextUnformatted(fmt.ctprintf("Enhanced output: %.1f original / %.1f generated FPS", e.original_fps, e.generated_fps))
-		imgui.TextUnformatted(fmt.ctprintf("Processing: %.2f ms / added delay: %.1f ms", e.status.processing_ms, f64(e.status.delay)/10_000))
+		imgui.TextUnformatted(fmt.ctprintf("Processing: %.2f ms / added delay: %.1f ms", e.status.processing_ms, f64(e.status.delay)/VIDEO_TICKS_PER_MS))
 		imgui.TextUnformatted(fmt.ctprintf("Enhancement misses: %d", e.status.missed))
 		imgui.TextDisabledUnformatted(fmt.ctprintf("Super resolution: %s", video_enhancement_text(e.status.vsr_state, e.status.vsr_reason)))
 		imgui.TextDisabledUnformatted(fmt.ctprintf("Frame generation: %s", video_enhancement_text(e.status.fruc_state, e.status.fruc_reason)))
