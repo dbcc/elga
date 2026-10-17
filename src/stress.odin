@@ -6,8 +6,9 @@ import "core:time"
 import win32 "core:sys/windows"
 
 // Debug harnesses compiled in only by their -define flags. ui_tick drives them.
-ELGA_FULLSCREEN_STRESS :: #config(ELGA_FULLSCREEN_STRESS, false)
-ELGA_FORMAT_STRESS     :: #config(ELGA_FORMAT_STRESS, false)
+ELGA_FULLSCREEN_STRESS  :: #config(ELGA_FULLSCREEN_STRESS, false)
+ELGA_FORMAT_STRESS      :: #config(ELGA_FORMAT_STRESS, false)
+ELGA_DEVICE_LOSS_STRESS :: #config(ELGA_DEVICE_LOSS_STRESS, false)
 
 // Debug builds only (-define:ELGA_FULLSCREEN_STRESS=true): twelve transitions, then exit.
 fullscreen_stress_tick :: proc() {
@@ -51,4 +52,32 @@ format_stress_tick :: proc() {
 		step += 1
 		fmt.eprintf("mode stress transition %d/8\n", step)
 	}
+}
+
+// Debug builds only (-define:ELGA_DEVICE_LOSS_STRESS=true): three simulated
+// device losses, each four seconds after the previous rebuild, then exits.
+// Runs the whole teardown and rebuild; the devices themselves stay healthy.
+device_loss_stress_tick :: proc() {
+	@(static) ready_since: time.Time
+	@(static) step: int
+	r := &app.renderer
+	if !r.ready {
+		ready_since = {}
+		return
+	}
+	now := time.now()
+	if ready_since == {} {
+		ready_since = now
+		return
+	}
+	if time.diff(ready_since, now) < 4*time.Second do return
+	fmt.eprintf("device loss stress state: capture_ready=%d %dx%d display=%.1f FPS recoveries=%d\n", sync.atomic_load_explicit(&r.capture_ready, .Acquire), r.mode.width, r.mode.height, r.display_fps, r.device_recoveries)
+	if step == 3 {
+		win32.PostMessageW(app.hwnd, win32.WM_CLOSE, 0, 0)
+		ready_since = time.time_add(now, time.Hour)
+		return
+	}
+	step += 1
+	fmt.eprintf("device loss stress %d/3\n", step)
+	renderer_mark_device_lost(r, RENDERER_RESOURCES_FAILED)
 }

@@ -46,6 +46,9 @@ AUDIO_VOLUME_WINDOW_FLAGS :: imgui.WindowFlags_NoDecoration | imgui.WindowFlags 
 }
 
 ImGui_State :: struct {
+	// The context, fonts and style outlive the render device; ready means the
+	// DX11 backend is bound to the current one.
+	ctx: ^imgui.Context,
 	ready: bool,
 	menu_open: bool,
 	last_frame: time.Time,
@@ -68,7 +71,9 @@ ImGui_State :: struct {
 imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
 	// Stops on a mismatch between the vendored bindings and the static library.
 	imgui.CHECKVERSION()
-	imgui.CreateContext()
+	ui.ctx = imgui.CreateContext()
+	// CreateContext keeps an existing current context current.
+	imgui.SetCurrentContext(ui.ctx)
 	io := imgui.GetIO()
 	io.IniFilename = nil
 	io.LogFilename = nil
@@ -76,7 +81,7 @@ imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
 	ui.font_size = UI_FONT_SIZE*ui.dpi_scale
 	ui.font = imgui.FontAtlas_AddFontDefaultVector(io.Fonts)
 	if ui.font == nil {
-		imgui.DestroyContext()
+		imgui_ui_destroy(ui)
 		return false
 	}
 	io.FontDefault = ui.font
@@ -97,20 +102,34 @@ imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
 	style.Colors[imgui.Col.CheckMark] = {0.74, 0.76, 0.78, 1}
 	imgui.Style_ScaleAllSizes(style, ui.dpi_scale)
 
-	if !imgui_dx11.Init(r.device_11, r.context_11) {
-		imgui.DestroyContext()
+	if !imgui_ui_attach_device(ui, r) {
+		imgui_ui_destroy(ui)
 		return false
 	}
-	ui.ready = true
 	ui.last_frame = time.now()
 	return true
 }
 
+// Binds the DX11 backend to the render device. After device recovery the
+// backend recreates the font atlas textures on its first frame.
+imgui_ui_attach_device :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
+	if ui.ctx == nil do return false
+	if !ui.ready do ui.ready = imgui_dx11.Init(r.device_11, r.context_11)
+	return ui.ready
+}
+
+// Releases the backend's references and textures on the render device.
+imgui_ui_release_device :: proc(ui: ^ImGui_State) {
+	if !ui.ready do return
+	imgui_dx11.Shutdown()
+	ui.ready = false
+}
+
 imgui_ui_destroy :: proc(ui: ^ImGui_State) {
-	if ui.ready {
-		imgui_dx11.Shutdown()
-		imgui.DestroyContext()
-		ui.ready = false
+	imgui_ui_release_device(ui)
+	if ui.ctx != nil {
+		imgui.DestroyContext(ui.ctx)
+		ui.ctx = nil
 	}
 }
 
@@ -120,7 +139,8 @@ imgui_ui_set_dpi :: proc(ui: ^ImGui_State, dpi: u32) {
 	if abs(new_scale-old_scale) < 0.001 do return
 	ui.dpi_scale = new_scale
 	ui.font_size = UI_FONT_SIZE*new_scale
-	if ui.ready {
+	// The style belongs to the context, which stays alive through device recovery.
+	if ui.ctx != nil {
 		imgui.Style_ScaleAllSizes(imgui.GetStyle(), new_scale/old_scale)
 	}
 }
@@ -498,6 +518,7 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 	imgui.TextUnformatted(fmt.ctprintf("Frame conversion errors: %d", totals.upload_errors))
 	imgui.TextUnformatted(fmt.ctprintf("Capture errors: %d", totals.source_errors))
 	imgui.TextUnformatted(fmt.ctprintf("Recovery requests: %d", totals.recovery_requests))
+	if r.device_recoveries > 0 do imgui.TextUnformatted(fmt.ctprintf("Graphics device recoveries: %d", r.device_recoveries))
 	imgui.TextDisabledUnformatted("Counts viewer drops; upstream loss is not measured")
 	imgui.Separator()
 	imgui.TextUnformatted("Recent stalls")

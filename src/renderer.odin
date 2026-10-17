@@ -100,6 +100,13 @@ Renderer :: struct {
 	fps_window_frames:  u32,
 	last_presented_seq: u64,
 	last_video_present: time.Time,
+	// Set when either device is removed or reset, or when GPU resources could
+	// not be restored. The UI tick then rebuilds every GPU object.
+	device_lost:        bool,
+	device_lost_reason: win32.HRESULT,
+	device_retry_at:    time.Time,
+	device_retry_count: u32,
+	device_recoveries:  u32,
 }
 
 renderer_request_redraw :: proc(r: ^Renderer) {
@@ -135,13 +142,26 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 		if !success do renderer_destroy(r)
 	}
 	r.hwnd = hwnd
-	r.width = max(width, 1)
-	r.height = max(height, 1)
 	r.capture_format = .NV12
 	r.format_auto = true
 	sync.atomic_store_explicit(&r.edid.status, u32(EDID_Availability.Unavailable), .Relaxed)
 	sync.atomic_store_explicit(&r.capture_formats, u32(1)<<u32(Capture_Format.NV12), .Relaxed)
+	r.fps_window_start = time.now()
+	if !renderer_create_device_objects(r, width, height) do return false
+	if !video_resources_create(r, r.capture_format, CAPTURE_AUTO_WIDTH, CAPTURE_AUTO_HEIGHT) do return false
+	if !capture_start(r) do return false
+	r.ready = true
+	return true
+}
 
+// Creates both D3D11 devices, the swap chain and the fixed video pipeline, but
+// no capture-sized resources. A failure can leave some objects behind;
+// renderer_release_device_objects frees them.
+renderer_create_device_objects :: proc(r: ^Renderer, width, height: u32, allow_basic_render := true) -> bool {
+	r.width = max(width, 1)
+	r.height = max(height, 1)
+	r.allow_tearing = false
+	// Always a new factory: one created before a driver reset lists stale adapters.
 	factory: ^dxgi.IFactory4
 	if !check(dxgi.CreateDXGIFactory2({}, dxgi.IFactory4_UUID, cast(^rawptr)&factory), "CreateDXGIFactory2") do return false
 	defer com_release(factory)
@@ -163,6 +183,13 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 	adapter: ^dxgi.IAdapter
 	if !check(dxgi_device.GetAdapter(dxgi_device, &adapter), "Render adapter") do return false
 	defer com_release(adapter)
+	if !allow_basic_render {
+		desc: dxgi.ADAPTER_DESC
+		if !failed(adapter.GetDesc(adapter, &desc)) && desc.VendorId == BASIC_RENDER_VENDOR_ID && desc.DeviceId == BASIC_RENDER_DEVICE_ID {
+			fmt.eprintln("Only the Microsoft Basic Render Driver is available; waiting for the GPU driver")
+			return false
+		}
+	}
 	if !check(d3d11.CreateDevice(adapter, .UNKNOWN, nil, {.BGRA_SUPPORT, .VIDEO_SUPPORT}, &feature_levels[0], 1, d3d11.SDK_VERSION, &r.capture_device_11, nil, &r.capture_context_11), "Capture D3D11CreateDevice") do return false
 	// Media Foundation and the capture callback share the capture context.
 	multithread: ^ID3D10Multithread
@@ -187,17 +214,35 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 		Flags       = renderer_swap_chain_flags(r),
 	}
 	swap1: ^dxgi.ISwapChain1
-	if !check(factory.CreateSwapChainForHwnd(factory, cast(^dxgi.IUnknown)r.device_11, hwnd, &swap_desc, nil, nil, &swap1), "CreateSwapChainForHwnd") do return false
+	if !check(factory.CreateSwapChainForHwnd(factory, cast(^dxgi.IUnknown)r.device_11, r.hwnd, &swap_desc, nil, nil, &swap1), "CreateSwapChainForHwnd") do return false
 	defer com_release(swap1)
 	if !check(swap1.QueryInterface(swap1, dxgi.ISwapChain3_UUID, cast(^rawptr)&r.swap_chain), "IDXGISwapChain3") do return false
-	factory.MakeWindowAssociation(factory, hwnd, {.NO_ALT_ENTER})
-	r.fps_window_start = time.now()
+	factory.MakeWindowAssociation(factory, r.hwnd, {.NO_ALT_ENTER})
+	return renderer_create_back_buffers(r) && video_pipeline_init(r)
+}
 
-	if !renderer_create_back_buffers(r) do return false
-	if !video_pipeline_init(r) do return false
-	if !capture_start(r) do return false
-	r.ready = true
-	return true
+// Releases every object created on either device. Capture must already be
+// stopped. The window, the user's capture selection and session history survive.
+renderer_release_device_objects :: proc(r: ^Renderer) {
+	video_enhancements_release_device(r)
+	renderer_release_back_buffers(r)
+	com_clear(&r.rasterizer)
+	com_clear(&r.sampler)
+	com_clear(&r.vertex_shader)
+	com_clear(&r.native_pixel_shader)
+	com_clear(&r.flipped_pixel_shader)
+	video_resources_release(r)
+	// A flip-model swap chain is destroyed only once the context drops its
+	// deferred references; the window cannot take a new one until then.
+	com_clear(&r.swap_chain)
+	if r.context_11 != nil do r.context_11.Flush(r.context_11)
+	com_clear(&r.video_context_1)
+	com_clear(&r.video_context)
+	com_clear(&r.video_device)
+	com_clear(&r.capture_context_11)
+	com_clear(&r.capture_device_11)
+	com_clear(&r.context_11)
+	com_clear(&r.device_11)
 }
 
 renderer_swap_chain_flags :: proc(r: ^Renderer) -> dxgi.SWAP_CHAIN {
@@ -307,6 +352,9 @@ renderer_present :: proc(r: ^Renderer) -> bool {
 		renderer_retry_redraw(r)
 	case dxgi.STATUS_OCCLUDED:
 		renderer_retry_redraw(r, 100)
+	case:
+		// The UI tick rebuilds the GPU objects once this draw has unwound.
+		if renderer_device_lost_error(hr) do renderer_mark_device_lost(r, hr)
 	}
 	return false
 }
@@ -323,7 +371,12 @@ renderer_request_resize :: proc(r: ^Renderer, width, height: u32) {
 renderer_resize :: proc(r: ^Renderer, width, height: u32) {
 	if !r.ready || width == 0 || height == 0 || (r.width == width && r.height == height) do return
 	renderer_release_back_buffers(r)
-	if !check(renderer_resize_swap_chain(r, width, height), "ResizeBuffers") {
+	hr := renderer_resize_swap_chain(r, width, height)
+	if renderer_device_lost_error(hr) {
+		renderer_mark_device_lost(r, hr)
+		return
+	}
+	if !check(hr, "ResizeBuffers") {
 		renderer_restore_back_buffers(r)
 		return
 	}
@@ -363,21 +416,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 		r.reconnect_thread = nil
 	}
 	capture_stop(r)
-	renderer_release_back_buffers(r)
-	com_release(r.rasterizer)
-	com_release(r.sampler)
-	com_release(r.vertex_shader)
-	com_release(r.native_pixel_shader)
-	com_release(r.flipped_pixel_shader)
-	video_resources_release(r)
-	com_release(r.capture_context_11)
-	com_release(r.capture_device_11)
-	com_release(r.video_context_1)
-	com_release(r.video_context)
-	com_release(r.video_device)
-	com_release(r.context_11)
-	com_release(r.device_11)
-	com_release(r.swap_chain)
+	renderer_release_device_objects(r)
 	r^ = {}
 }
 
@@ -393,7 +432,6 @@ video_pipeline_init :: proc(r: ^Renderer) -> bool {
 	if !check(r.device_11.CreateSamplerState(r.device_11, &sampler_desc, &r.sampler), "Video sampler") do return false
 	raster_desc := d3d11.RASTERIZER_DESC{FillMode = .SOLID, CullMode = .NONE, DepthClipEnable = true}
 	if !check(r.device_11.CreateRasterizerState(r.device_11, &raster_desc, &r.rasterizer), "Video rasterizer") do return false
-	if !video_resources_create(r, r.capture_format, CAPTURE_AUTO_WIDTH, CAPTURE_AUTO_HEIGHT) do return false
 	video_pipeline_bind(r)
 	return true
 }

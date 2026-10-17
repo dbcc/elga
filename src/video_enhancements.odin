@@ -63,6 +63,8 @@ Video_Preference :: enum { Super_Resolution, Frame_Generation, Game_30_FPS }
 Video_Enhancements :: struct {
 	preferences: Video_Preferences,
 	loaded, load_attempted, save_failed: bool,
+	// caps describe the render adapter, which device recovery can replace.
+	caps_known: bool,
 	// The audio monitor that receives the matching delay, if any.
 	audio: ^Audio_State,
 	module: win32.HMODULE,
@@ -159,9 +161,18 @@ video_backend_valid :: proc(api: Video_API) -> bool {
 
 video_backend_load :: proc(r: ^Renderer) {
 	e := &r.enhancements
-	if e.load_attempted do return
-	e.load_attempted = true
-	e.caps = {vsr_reason = .Runtime, fruc_reason = .Runtime}
+	if !e.load_attempted {
+		e.load_attempted = true
+		e.caps = {vsr_reason = .Runtime, fruc_reason = .Runtime}
+		video_backend_open(e)
+	}
+	if e.loaded && !e.caps_known {
+		e.api.query(r.device_11, &e.caps)
+		e.caps_known = true
+	}
+}
+
+video_backend_open :: proc(e: ^Video_Enhancements) {
 	directory, err := os.get_executable_directory(context.temp_allocator)
 	if err != nil do return
 	path, path_err := filepath.join([]string{directory, "enhancements", "nvidia", "elga-video.dll"}, context.temp_allocator)
@@ -176,7 +187,6 @@ video_backend_load :: proc(r: ^Renderer) {
 		return
 	}
 	e.module, e.api, e.loaded = module, api, true
-	e.api.query(r.device_11, &e.caps)
 }
 
 video_enhancements_toggle :: proc(r: ^Renderer, preference: Video_Preference) {
@@ -234,6 +244,20 @@ video_enhancements_reset :: proc(r: ^Renderer) {
 video_enhancements_pause :: proc(r: ^Renderer, reason: Video_Effect_Reason) {
 	video_enhancements_reset(r)
 	video_status_set(&r.enhancements, .Paused, reason, reason)
+}
+
+// The add-on session and every cached texture belong to the render device.
+// Device recovery destroys them; preferences, the add-on and the timer remain.
+video_enhancements_release_device :: proc(r: ^Renderer) {
+	e := &r.enhancements
+	video_enhancements_reset(r)
+	if e.session != nil {
+		e.api.destroy(e.session)
+		e.session = nil
+	}
+	e.caps_known = false
+	// Failures on the lost device say nothing about its replacement.
+	e.stalled, e.output_failed = false, false
 }
 
 video_enhancements_destroy :: proc(r: ^Renderer) {

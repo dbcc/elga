@@ -193,6 +193,9 @@ capture_start :: proc(r: ^Renderer) -> bool {
 	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
 	sync.atomic_store_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Release)
 	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
+	// The new generation makes any unhandled result stale. Leaving it pending
+	// would keep renderer_edid_busy true and lock the capture settings.
+	sync.atomic_store_explicit(&r.edid.result_pending, 0, .Release)
 	renderer_set_edid_state(r, .Reading, .None)
 	renderer_set_color_range_state(r, .Reading, .None)
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)

@@ -10,19 +10,25 @@ renderer_request_reconnect :: proc(r: ^Renderer, count_recovery := true) -> bool
 	if r == nil || !r.ready || r.capture_suspended || r.drawing || r.reconnect_thread != nil || renderer_edid_in_flight(r) do return false
 	r.reconnect_error = false
 	video_enhancements_reset(r)
-	sync.atomic_store_explicit(&r.reconnect_done, 0, .Release)
-	r.reconnect_thread = thread.create(renderer_reconnect_thread_proc, .Normal, "capture-reconnect")
-	if r.reconnect_thread == nil {
+	if !renderer_start_capture_shutdown(r) {
 		r.reconnect_error = true
 		return false
 	}
-	// Invalidate callbacks and pending screenshots belonging to the old session.
-	sync.atomic_add_explicit(&r.capture_generation, 1, .Acq_Rel)
 	if count_recovery do capture_health_note_recovery(&r.health)
 	capture_health_reset_timing(r)
+	renderer_request_redraw(r)
+	return true
+}
+
+// Runs capture_stop on the worker. renderer_update_reconnect joins it.
+renderer_start_capture_shutdown :: proc(r: ^Renderer) -> bool {
+	sync.atomic_store_explicit(&r.reconnect_done, 0, .Release)
+	r.reconnect_thread = thread.create(renderer_reconnect_thread_proc, .Normal, "capture-reconnect")
+	if r.reconnect_thread == nil do return false
+	// Invalidate callbacks and pending screenshots belonging to the old session.
+	sync.atomic_add_explicit(&r.capture_generation, 1, .Acq_Rel)
 	r.reconnect_thread.data = r
 	thread.start(r.reconnect_thread)
-	renderer_request_redraw(r)
 	return true
 }
 
@@ -39,6 +45,8 @@ renderer_update_reconnect :: proc(r: ^Renderer) -> bool {
 	thread.destroy(r.reconnect_thread)
 	r.reconnect_thread = nil
 	sync.atomic_store_explicit(&r.reconnect_done, 0, .Release)
+	// Device recovery restarts capture on the replacement devices.
+	if r.device_lost do return true
 	if r.suspend_requested || r.capture_suspended {
 		renderer_suspend_capture(r)
 		return true

@@ -235,6 +235,15 @@ presentations even when no new frame arrives. During a resize, only the latest
 size is applied. While the window is minimized, capture-sized textures are
 released and the swap chain shrinks to 1x1.
 
+**Graphics device loss.** If a driver update, crash, or GPU reset removes the
+D3D11 devices, the viewer stops drawing, shuts capture down in the background,
+and rebuilds the devices, swap chain, video pipeline, title bar, and
+enhancement session. Capture then resumes with the same choices. Attempts are
+retried every 1–5 seconds, and the Microsoft Basic Render Driver is refused for
+the first ten attempts so a restarting driver doesn't leave the app on CPU
+rendering. Until recovery, the taskbar title and the window show that the
+graphics device is being restored.
+
 **UI.** Dear ImGui draws the title bar through its D3D11 backend. It is skipped
 entirely while the bar is hidden in fullscreen, except to show screenshot
 messages. Screenshots copy the frame back from the GPU only when you ask for
@@ -282,6 +291,11 @@ On 2026-10-17, HDMI color range control was checked on the same card while
 capturing 3840x2160 NV12 at 60 FPS. Three runs each changed Auto to Expand,
 Shrink, and back to Auto, confirmed every change with a separate read, and
 recorded no capture source errors. The original Auto setting was restored.
+
+Also on 2026-10-17, the device-loss stress build simulated three graphics
+device losses while capturing 3840x2160 NV12 at 60 FPS. Each rebuild succeeded
+on its first attempt, and capture resumed in the same mode. A real driver reset
+hasn't been tested yet.
 
 **EDID troubleshooting:** close other capture apps, connect the 4K X directly to
 the PC, make sure a display is attached to the card's HDMI output, reopen the

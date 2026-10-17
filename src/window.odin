@@ -29,7 +29,8 @@ window_proc :: proc "system" (hwnd: win32.HWND, msg: win32.UINT, wparam: win32.W
 		return 1
 	case win32.WM_PAINT:
 		ps: win32.PAINTSTRUCT
-		win32.BeginPaint(hwnd, &ps)
+		hdc := win32.BeginPaint(hwnd, &ps)
+		if app.renderer.device_lost && app.renderer.swap_chain == nil do window_paint_device_lost(hwnd, hdc)
 		// Validate before drawing so a capture arriving during the draw leaves
 		// another paint pending. Windows coalesces paints behind mouse input.
 		win32.EndPaint(hwnd, &ps)

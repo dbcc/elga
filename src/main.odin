@@ -65,6 +65,7 @@ App :: struct {
 	last_ui_tick:     time.Time,
 	pinned_x:         i32,
 	pinned_y:         i32,
+	device_lost_shown: bool,
 }
 
 app: App
@@ -171,6 +172,7 @@ ui_tick :: proc() {
 	app.last_ui_tick = now
 	changed := wake_update(&app.wake)
 	changed |= renderer_update_reconnect(&app.renderer)
+	changed |= app_update_device_recovery()
 	capture_health_update(&app.renderer)
 	video_enhancements_health_tick(&app.renderer)
 	if !app.renderer.drawing && screenshot_update(&app.screenshot, &app.renderer) {
@@ -202,6 +204,7 @@ ui_tick :: proc() {
 
 	when ELGA_FULLSCREEN_STRESS do fullscreen_stress_tick()
 	when ELGA_FORMAT_STRESS do format_stress_tick()
+	when ELGA_DEVICE_LOSS_STRESS do device_loss_stress_tick()
 }
 
 post_ui_action :: proc(action: UI_Action, value := 0) {

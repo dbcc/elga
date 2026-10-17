@@ -7,6 +7,14 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ### Fixed
 
+- Recover from a lost graphics device, such as a driver update, crash, or GPU
+  reset, instead of freezing until restart. Capture stops in the background,
+  every GPU object is rebuilt, and capture resumes with the same format and
+  resolution. Failed attempts retry every 1–5 seconds, and the taskbar title
+  shows the state meanwhile. Verified with a simulated loss on hardware; a real
+  driver reset still needs testing.
+- Clear an unhandled EDID result when capture restarts, so a reconnect at the
+  wrong moment can no longer leave the capture settings disabled.
 - Retry a read-only EDID query when the card returns a malformed reply, as it
   has shortly after streaming started.
 - Preserve manual 30 FPS playback timing and audio delay across short capture

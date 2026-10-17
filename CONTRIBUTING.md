@@ -26,11 +26,15 @@ Run these before opening a pull request:
 ```powershell
 odin check src -vet -strict-style
 odin test src -vet -strict-style -out:build/elga-tests.exe
-odin check src -vet -define:ELGA_FULLSCREEN_STRESS=true -define:ELGA_FORMAT_STRESS=true
+odin check src -vet -define:ELGA_FULLSCREEN_STRESS=true -define:ELGA_FORMAT_STRESS=true -define:ELGA_DEVICE_LOSS_STRESS=true
 .\build.ps1 -Configuration Release
 ```
 
-The stress defines compile the fullscreen and capture-format transition paths.
+The stress defines compile the fullscreen, capture-format, and device-loss
+harnesses. Built with `-define:ELGA_DEVICE_LOSS_STRESS=true`, the viewer
+simulates three graphics device losses, rebuilds after each, and exits; its
+stderr shows each recovery. To exercise a real loss on hardware, press
+`Win+Ctrl+Shift+B` while capturing, which restarts the graphics driver.
 On a machine with a D3D11 video-capable GPU, also run the synthetic pixel tests:
 
 ```powershell
