@@ -18,7 +18,8 @@ separate add-on.
   Windows Media Foundation.
 - **Faithful color:** the card's native YUV encoding is described directly to
   the D3D11 video processor. The app adds no color, range, gamma, contrast, or
-  saturation adjustments, and it never changes the card's color-range setting.
+  saturation adjustments, and it changes the card's HDMI color range only when
+  you pick one.
 - **Sensible automatic mode selection:** at 4K, Auto prefers the highest rate
   up to 60 FPS, so a 60 Hz HDMI source isn't padded out with duplicate
   120/144 FPS frames.
@@ -26,6 +27,8 @@ separate add-on.
   choice of Windows output device.
 - **Input EDID mode control** (Merged, Display, Internal), checked by reading
   the mode back from the card.
+- **HDMI color range control** (Auto, Expand, Shrink), also checked by
+  reading the setting back from the card.
 - **Optional NVIDIA video enhancements:** RTX Video Super Resolution and 2x
   frame generation, each toggled on its own, with matching audio delay. These
   need a separately built add-on. See
@@ -152,6 +155,16 @@ If none is found, video still works but audio is unavailable.
   is reported as successful only after a separate readback confirms it. The app
   doesn't save or reapply a preferred mode. If the mode shows as unknown, use
   **Refresh mode** instead of picking the same mode again.
+- **HDMI color range**: reads and changes how the card converts the HDMI
+  input's range.
+  - **Auto (recommended)**: matches the range the HDMI source sends.
+  - **Expand**: converts a limited range (16-235) to a full range (0-255).
+  - **Shrink**: converts a full range (0-255) to a limited range (16-235).
+
+  The card applies the conversion itself, without interrupting the HDMI signal
+  or capture. The viewer decodes the result exactly as before, so pick
+  whichever setting looks right for your source. Like the EDID mode, a change
+  is confirmed by a separate readback and isn't saved by the app.
 - **Resolution**: Auto, or any native 16:9 resolution the selected format
   offers. Auto picks the largest resolution. At 4K it prefers the highest rate
   up to 60 FPS, or the lowest advertised rate if none is at or below 60. Picking
@@ -211,7 +224,8 @@ download, CPU color conversion, or CPU-to-GPU upload.
 **Color range.** In its 4K144 NV12 mode, the 4K X labels its output as full
 range even though the sample values are video range. The viewer ignores that
 label and tells the video processor the real encoding, which avoids washed-out
-blacks.
+blacks. The **HDMI color range** setting changes the card's input conversion,
+not this decoding.
 
 **Responsiveness.** If the presentation texture is busy, the incoming capture
 frame is dropped before any buffer work is done. Repaints reuse the last
@@ -246,8 +260,10 @@ Foundation source as video. Before enabling writes, the worker finds the
 matching KS extension node, checks property support, confirms protocol
 version 4, and reads the current mode. Writes are never retried automatically.
 After any write that may have reached the card, capture reconnects and devices
-are enumerated again. See [`docs/EDID_PROTOCOL.md`](docs/EDID_PROTOCOL.md) for
-the transport details and test fixtures.
+are enumerated again. HDMI color range requests use the same worker and
+extension unit, but a change never reconnects capture. See
+[`docs/EDID_PROTOCOL.md`](docs/EDID_PROTOCOL.md) for the transport details and
+test fixtures.
 
 ## Hardware verification
 
@@ -261,6 +277,11 @@ Protocol identification, changes to Merged, Display, and Internal, separate
 readback, capture recovery, minimize and restore, and refresh all passed, and
 the original Merged mode was restored afterwards. Physical unplug and replug
 testing is still pending.
+
+On 2026-10-17, HDMI color range control was checked on the same card while
+capturing 3840x2160 NV12 at 60 FPS. Three runs each changed Auto to Expand,
+Shrink, and back to Auto, confirmed every change with a separate read, and
+recorded no capture source errors. The original Auto setting was restored.
 
 **EDID troubleshooting:** close other capture apps, connect the 4K X directly to
 the PC, make sure a display is attached to the card's HDMI output, reopen the

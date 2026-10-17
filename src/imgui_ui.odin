@@ -62,6 +62,7 @@ ImGui_State :: struct {
 	audio_hover_started: f64,
 	audio_leave_started: f64,
 	edid_menu_open: bool,
+	color_range_menu_open: bool,
 }
 
 imgui_ui_init :: proc(ui: ^ImGui_State, r: ^Renderer) -> bool {
@@ -307,6 +308,14 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 		imgui.EndMenu()
 	}
 	ui.edid_menu_open = edid_open
+	color_range_open := imgui.BeginMenu("HDMI color range")
+	ui_item_tooltip(ui, "Convert the HDMI input between limited (16-235) and full (0-255) range on the card. The connected 4K X is the source of truth.")
+	if color_range_open {
+		if !ui.color_range_menu_open do post_ui_action(.EDID_Refresh)
+		imgui_build_color_range_menu(ui, r)
+		imgui.EndMenu()
+	}
+	ui.color_range_menu_open = color_range_open
 	imgui.Separator()
 	imgui.BeginDisabled(!can_configure)
 	if imgui.BeginMenu("Resolution") {
@@ -400,6 +409,49 @@ edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, m
 		if known do return fmt.ctprintf("Current: %s", EDID_MODE_NAME[mode])
 	}
 	return "EDID control unavailable"
+}
+
+imgui_build_color_range_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
+	status := EDID_Availability(sync.atomic_load_explicit(&r.edid.color_range_status, .Acquire))
+	known := sync.atomic_load_explicit(&r.edid.color_range_known, .Acquire) != 0
+	current := Color_Range(sync.atomic_load_explicit(&r.edid.color_range, .Relaxed))
+	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
+
+	Option :: struct {range: Color_Range, tooltip: cstring}
+	options := [?]Option{
+		{.Auto,   "Matches the range your HDMI source sends."},
+		{.Expand, "Converts a limited range (16-235) to a full range (0-255)."},
+		{.Shrink, "Converts a full range (0-255) to a limited range (16-235)."},
+	}
+	imgui.BeginDisabled(status != .Ready || renderer_edid_busy(r) || !capture_ready)
+	for option in options {
+		if imgui.MenuItem(COLOR_RANGE_NAME[option.range], nil, known && current == option.range) do post_ui_action(.Color_Range, int(option.range))
+		ui_item_tooltip(ui, option.tooltip)
+	}
+	imgui.EndDisabled()
+
+	imgui.Separator()
+	refresh_enabled := r.capture_event != nil && !r.capture_suspended && r.reconnect_thread == nil && capture_ready && !renderer_edid_busy(r)
+	if imgui.MenuItem("Refresh setting", nil, false, refresh_enabled) do post_ui_action(.EDID_Refresh)
+	imgui.TextDisabledUnformatted(color_range_status_text(r, status, known, current))
+}
+
+color_range_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, range: Color_Range) -> cstring {
+	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.color_range_error, .Relaxed))
+	#partial switch status {
+	case .Reading: return "Reading setting..."
+	case .Applying: return "Applying setting..."
+	case .Unknown: return "Setting unknown - refresh required"
+	case .Unavailable:
+		if error == .Unsupported do return "Color range control unavailable for this device"
+		return fmt.ctprintf("Color range unavailable: %s", EDID_ERROR_TEXT[error])
+	case .Error:
+		return fmt.ctprintf("Setting read failed: %s", EDID_ERROR_TEXT[error])
+	case .Ready:
+		if error == .Readback_Mismatch && known do return fmt.ctprintf("Card reports %s; requested setting did not match", COLOR_RANGE_NAME[range])
+		if known do return fmt.ctprintf("Current: %s", COLOR_RANGE_NAME[range])
+	}
+	return "Color range control unavailable"
 }
 
 imgui_build_capture_health :: proc(r: ^Renderer) {

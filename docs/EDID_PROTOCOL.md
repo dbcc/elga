@@ -90,6 +90,9 @@ replies contained the four-byte mode:
 
 Read-only identification and mode commands follow the vendor transport's
 three-attempt behavior. Mode writes remain single-shot and are never retried.
+A malformed reply to a read-only command is retried within the same three
+attempts: shortly after streaming started, the card has answered a protocol
+query with `64 04 F0 0C 06 00 00 00 00`, which is not an RTICE frame.
 
 SET is enabled only after `0x67` and `0x4E` both succeed with recognized
 values. A requested value is confirmed only by a separate post-write protocol
@@ -97,10 +100,69 @@ check and `0x4E` readback. A different recognized value is a mismatch and is
 reported as the actual mode. A failure after the data write is uncertain: the
 selection is cleared, capture is re-opened, and the write is never repeated.
 
+## HDMI color range
+
+The same transport carries the HDMI input color range setting. These commands
+come from Elgato Studio 2.0.0.2396: `EGAVDeviceSupport.dll` maps its
+`EGAVDS_COLOR_RANGE` values onto `AT_Set_ColorRange` and
+`AT_Get_ColorRange_Setting` in the shipped `RTICE_SDK_x64.dll`. Every RTICE SDK
+command passes the vendor transport flag that selects service `A1`. Only the
+transport's own `0x67` probe uses `A0`.
+
+| Setting | Studio name | Device value |
+| --- | --- | --- |
+| Auto | `BYPASS` | `0` |
+| Expand (limited to full) | `EXPAND` | `3` |
+| Shrink (full to limited) | `SHRINK` | `4` |
+
+- GET: command `0x91` with one payload byte, `01`. The setting is the first
+  reply byte. The vendor reads only that byte, and the decoder accepts a reply
+  of one to four bytes.
+- SET: command `0x7C` with two payload bytes, `01` and the device value. The
+  card acknowledges with an empty body (`A1 00 5F`), so the decoder accepts a
+  frame whose length byte is zero.
+
+Color range writes follow the mode rules: they are enabled only after a verified
+read, sent once, and confirmed by a separate read. Unlike a mode change, a
+color range change doesn't interrupt the HDMI signal, so no outcome reconnects
+capture. An uncertain write marks the setting unknown until the next read.
+
+Wire evidence on the PID `009B` card, 2026-10-17, while capturing:
+
+| Operation | Request | Reply |
+| --- | --- | --- |
+| Read (Auto) | `A1 07 00 00 91 00 00 00 01 C6` | `A1 06 00 00 00 00 00 00 59` |
+| Read (Expand) | same | `A1 06 00 00 03 00 00 00 56` |
+| Set Auto | `A1 08 00 00 7C 00 00 00 01 00 DA` | `A1 00 5F` |
+| Set Expand | `A1 08 00 00 7C 00 00 00 01 03 D7` | `A1 00 5F` |
+
+Auto to Expand, Shrink, and back to Auto passed in three consecutive runs, each
+confirmed by a separate read with no capture source errors.
+
+## Not implemented: audio input and custom EDID
+
+Studio also offers these for the 4K X. Both write the card's flash, so they are
+documented here but not implemented.
+
+- **Audio input** (HDMI or the 3.5 mm analog jack): elga already plays the
+  card's HDMI audio, so this only matters for the analog jack. Studio programs
+  the card's audio codec over the Realtek I2C passthrough
+  (`AT_System_Send_ExternalMCU_cmd`, command `0x1C`; its CS42L51 path uses I2C
+  address `0x4A`, and which codec the 4K X carries wasn't determined). The
+  passthrough uses the RTICE header but zero-pads the packet to 525 bytes. Studio
+  then stores the choice in byte 0 of a 32-byte "customer
+  proprietary" flash block. That block is read with command `0x52` and written
+  with `0x51` (32-byte payload). Byte 0 is `0` for HDMI and `1` for analog.
+- **Custom EDID**: `AT_EDID_Flash_Set_table` reads the whole 0xE00-byte EDID
+  table with command `0x54`, replaces one 512-byte slot, and re-burns it through
+  `rtk_burnEDID`.
+
 ## Test fixtures
 
 `src/edid_test.odin` models the length/data properties and records every framed
-packet. It covers all device-value mappings, exact SET framing, protocol-version
+packet. It covers all device-value mappings for both settings, exact SET
+framing, the captured color range packets, retry of the captured non-RTICE
+reply, protocol-version
 rejection, unknown modes, polling exhaustion, oversized and truncated
 responses, unsupported property capabilities, cancellation, pre-write failure,
 uncertain write failure, readback mismatch, single-operation mailbox behavior,

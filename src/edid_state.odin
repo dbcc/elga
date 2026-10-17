@@ -28,6 +28,13 @@ EDID_Channel :: struct {
 	// Follow-up after a write that may have changed the card.
 	restore_pending:       u32,
 	verification_required: u32,
+	// HDMI color range, published like the mode: EDID_Availability,
+	// EDID_Protocol_Error, Color_Range. A failed write never reconnects.
+	color_range_status:    u32,
+	color_range_error:     u32,
+	color_range:           u32,
+	color_range_known:     u32,
+	requested_color_range: u32,
 }
 
 // An EDID transfer is queued for, or running on, the capture thread.
@@ -54,14 +61,42 @@ renderer_set_edid_state :: proc(r: ^Renderer, status: EDID_Availability, error: 
 	sync.atomic_store_explicit(&r.edid.status, u32(status), .Release)
 }
 
+// Publishes the color range shown by the UI. A nil range marks it unknown.
+renderer_set_color_range_state :: proc(r: ^Renderer, status: EDID_Availability, error: EDID_Protocol_Error, range: Maybe(Color_Range) = nil) {
+	current, known := range.?
+	if known do sync.atomic_store_explicit(&r.edid.color_range, u32(current), .Relaxed)
+	sync.atomic_store_explicit(&r.edid.color_range_known, 1 if known else 0, .Relaxed)
+	sync.atomic_store_explicit(&r.edid.color_range_error, u32(error), .Relaxed)
+	sync.atomic_store_explicit(&r.edid.color_range_status, u32(status), .Release)
+}
+
 // Capture thread: reports what EDID control a newly opened session offers.
-renderer_publish_edid_open :: proc(r: ^Renderer, generation: u32, available: bool, mode: EDID_Mode, error: EDID_Protocol_Error, node_id: u32) {
+renderer_publish_edid_open :: proc(
+	r: ^Renderer,
+	generation: u32,
+	available: bool,
+	mode: EDID_Mode,
+	error: EDID_Protocol_Error,
+	node_id: u32,
+	color_range: Color_Range,
+	color_range_error: EDID_Protocol_Error,
+) {
 	if !available {
 		renderer_set_edid_state(r, .Unavailable, .Unsupported)
+		renderer_set_color_range_state(r, .Unavailable, .Unsupported)
 		fmt.eprintln("EDID extension unavailable on the selected capture source")
 		return
 	}
 	if generation != sync.atomic_load_explicit(&r.capture_generation, .Acquire) do return
+	if error != .None {
+		renderer_set_color_range_state(r, .Unavailable, error)
+	} else if color_range_error == .None {
+		renderer_set_color_range_state(r, .Ready, .None, color_range)
+		fmt.eprintf("Color range read: %s\n", COLOR_RANGE_NAME[color_range])
+	} else {
+		renderer_set_color_range_state(r, .Error, color_range_error)
+		fmt.eprintf("Color range read failed: %v\n", color_range_error)
+	}
 	if sync.atomic_load_explicit(&r.edid.verification_required, .Acquire) != 0 {
 		renderer_set_edid_state(r, .Unknown, .Readback_Failed)
 		fmt.eprintln("EDID write remains unverified; explicit refresh required")
@@ -79,7 +114,7 @@ renderer_request_edid_refresh :: proc(r: ^Renderer) -> bool {
 	   sync.atomic_load_explicit(&r.capture_ready, .Acquire) == 0 || renderer_edid_busy(r) {
 		return false
 	}
-	request_id := renderer_queue_edid_request(r, .Refresh, .Reading)
+	request_id := renderer_queue_edid_request(r, .Refresh)
 	fmt.eprintf("EDID refresh requested: request=%d\n", request_id)
 	return true
 }
@@ -92,17 +127,37 @@ renderer_request_edid_mode :: proc(r: ^Renderer, mode: EDID_Mode) -> bool {
 		return true
 	}
 	sync.atomic_store_explicit(&r.edid.requested_mode, u32(mode), .Relaxed)
-	request_id := renderer_queue_edid_request(r, .Set, .Applying)
+	request_id := renderer_queue_edid_request(r, .Set)
 	fmt.eprintf("EDID mode change requested: request=%d mode=%s\n", request_id, EDID_MODE_NAME[mode])
 	return true
 }
 
+renderer_request_color_range :: proc(r: ^Renderer, range: Color_Range) -> bool {
+	if r == nil || !r.ready || r.capture_suspended || r.capture_event == nil || renderer_edid_busy(r) do return false
+	if EDID_Availability(sync.atomic_load_explicit(&r.edid.color_range_status, .Acquire)) != .Ready do return false
+	if sync.atomic_load_explicit(&r.edid.color_range_known, .Acquire) != 0 &&
+	   Color_Range(sync.atomic_load_explicit(&r.edid.color_range, .Relaxed)) == range {
+		return true
+	}
+	sync.atomic_store_explicit(&r.edid.requested_color_range, u32(range), .Relaxed)
+	request_id := renderer_queue_edid_request(r, .Set_Color_Range)
+	fmt.eprintf("Color range change requested: request=%d range=%s\n", request_id, COLOR_RANGE_NAME[range])
+	return true
+}
+
 // Fills the single-entry mailbox the capture thread drains between samples.
-renderer_queue_edid_request :: proc(r: ^Renderer, kind: EDID_Request_Kind, status: EDID_Availability) -> u32 {
+// Only the settings the request touches show progress.
+renderer_queue_edid_request :: proc(r: ^Renderer, kind: EDID_Request_Kind) -> u32 {
 	request_id := sync.atomic_add_explicit(&r.edid.request_id, 1, .Acq_Rel)+1
 	sync.atomic_store_explicit(&r.edid.request_generation, sync.atomic_load_explicit(&r.capture_generation, .Acquire), .Relaxed)
-	sync.atomic_store_explicit(&r.edid.error, u32(EDID_Protocol_Error.None), .Relaxed)
-	sync.atomic_store_explicit(&r.edid.status, u32(status), .Release)
+	if kind != .Set_Color_Range {
+		sync.atomic_store_explicit(&r.edid.error, u32(EDID_Protocol_Error.None), .Relaxed)
+		sync.atomic_store_explicit(&r.edid.status, u32(EDID_Availability.Applying if kind == .Set else EDID_Availability.Reading), .Release)
+	}
+	if kind != .Set {
+		sync.atomic_store_explicit(&r.edid.color_range_error, u32(EDID_Protocol_Error.None), .Relaxed)
+		sync.atomic_store_explicit(&r.edid.color_range_status, u32(EDID_Availability.Applying if kind == .Set_Color_Range else EDID_Availability.Reading), .Release)
+	}
 	sync.atomic_store_explicit(&r.edid.request_kind, u32(kind), .Release)
 	win32.SetEvent(r.capture_event)
 	return request_id
@@ -114,6 +169,13 @@ renderer_publish_edid_result :: proc(r: ^Renderer, result: EDID_Result) {
 	sync.atomic_store_explicit(&r.edid.result_id, result.request_id, .Relaxed)
 	sync.atomic_store_explicit(&r.edid.result_generation, result.generation, .Relaxed)
 	sync.atomic_store_explicit(&r.edid.result_disposition, u32(result.disposition), .Relaxed)
+	if result.kind != .Set do renderer_publish_color_range_result(r, result)
+	if result.kind != .Set_Color_Range do renderer_publish_edid_mode_result(r, result)
+	sync.atomic_store_explicit(&r.edid.result_pending, 1, .Release)
+	win32.PostMessageW(r.hwnd, EDID_RESULT_MESSAGE, win32.WPARAM(result.generation), win32.LPARAM(result.request_id))
+}
+
+renderer_publish_edid_mode_result :: proc(r: ^Renderer, result: EDID_Result) {
 	#partial switch result.disposition {
 	case .May_Have_Applied:
 		sync.atomic_store_explicit(&r.edid.verification_required, 1, .Relaxed)
@@ -134,8 +196,17 @@ renderer_publish_edid_result :: proc(r: ^Renderer, result: EDID_Result) {
 	mode: Maybe(EDID_Mode)
 	if result.mode_known do mode = result.mode
 	renderer_set_edid_state(r, status, result.error, mode)
-	sync.atomic_store_explicit(&r.edid.result_pending, 1, .Release)
-	win32.PostMessageW(r.hwnd, EDID_RESULT_MESSAGE, win32.WPARAM(result.generation), win32.LPARAM(result.request_id))
+}
+
+// An uncertain write leaves the range unknown until the next read; a readback
+// mismatch stays visible as the error while the actual range is shown.
+renderer_publish_color_range_result :: proc(r: ^Renderer, result: EDID_Result) {
+	status := EDID_Availability.Ready
+	if !result.color_range_known do status = .Unknown
+	if result.color_range_disposition == .Not_Applied && result.color_range_error != .None do status = .Error
+	range: Maybe(Color_Range)
+	if result.color_range_known do range = result.color_range
+	renderer_set_color_range_state(r, status, result.color_range_error, range)
 }
 
 renderer_handle_edid_result :: proc(r: ^Renderer, generation, request_id: u32) {

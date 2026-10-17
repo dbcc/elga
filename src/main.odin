@@ -35,6 +35,7 @@ UI_Action :: enum u32 {
 	Reconnect,
 	EDID_Mode,
 	EDID_Refresh,
+	Color_Range,
 	Video_Super_Resolution,
 	Video_Frame_Generation,
 	Video_Game_30_FPS,
@@ -242,6 +243,8 @@ apply_ui_action :: proc(action: UI_Action, value: int) {
 		if value >= 0 && value < len(EDID_Mode) do renderer_request_edid_mode(&app.renderer, EDID_Mode(value))
 	case .EDID_Refresh:
 		renderer_request_edid_refresh(&app.renderer)
+	case .Color_Range:
+		if value >= 0 && value < len(Color_Range) do renderer_request_color_range(&app.renderer, Color_Range(value))
 	case .Video_Super_Resolution:
 		video_enhancements_toggle(&app.renderer, .Super_Resolution)
 	case .Video_Frame_Generation:

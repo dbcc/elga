@@ -18,6 +18,9 @@ EDID_Test_Fault :: enum {
 EDID_Test_Transport :: struct {
 	mode: u8,
 	version: u8,
+	color_range: u8,
+	// Color range GET reply payload length; zero means four bytes, -1 none.
+	color_range_reply_length: int,
 	fault: EDID_Test_Fault,
 	expected_length: u16,
 	response: [EDID_MAX_TRANSFER]u8,
@@ -28,6 +31,8 @@ EDID_Test_Transport :: struct {
 	command_count: int,
 	cancelled: bool,
 	timeout_polls_remaining: u32,
+	// Replace this many data reads with the non-RTICE frame seen on hardware.
+	foreign_replies_remaining: int,
 }
 
 edid_test_cancelled :: proc(ctx: rawptr) -> bool {
@@ -52,7 +57,7 @@ edid_test_property :: proc(ctx: rawptr, property_id, flags: u32, data: rawptr, d
 		   bytes[2] != 0 || bytes[3] != 0 || edid_checksum(bytes[:data_length]) != 0 {
 			return false
 		}
-		if f.fault == .Data_Write && command == EDID_COMMAND_SET_MODE do return false
+		if f.fault == .Data_Write && (command == EDID_COMMAND_SET_MODE || command == EDID_COMMAND_SET_COLOR_RANGE) do return false
 		index := f.command_count
 		f.commands[index] = command
 		f.command_lengths[index] = u16(data_length)
@@ -71,10 +76,23 @@ edid_test_property :: proc(ctx: rawptr, property_id, flags: u32, data: rawptr, d
 			if data_length != 13 do return false
 			if f.fault != .Mismatch do f.mode = bytes[8]
 			f.response[4] = f.mode
+		case EDID_COMMAND_GET_COLOR_RANGE:
+			if data_length != 10 || bytes[8] != COLOR_RANGE_SELECTOR do return false
+			payload := f.color_range_reply_length if f.color_range_reply_length != 0 else 4
+			if payload < 0 do payload = 0
+			f.response_length = u16(payload+5)
+			f.response[1] = u8(payload+2)
+			if payload > 0 do f.response[4] = f.color_range
+		case EDID_COMMAND_SET_COLOR_RANGE:
+			if data_length != 11 || bytes[8] != COLOR_RANGE_SELECTOR do return false
+			if f.fault != .Mismatch do f.color_range = bytes[9]
+			// The card acknowledges with an empty body.
+			f.response_length = 3
+			f.response[1] = 0
 		case:
 			return false
 		}
-		f.response[8] = edid_checksum(f.response[:8])
+		f.response[f.response_length-1] = edid_checksum(f.response[:f.response_length-1])
 		bytes_returned^ = 0
 		return true
 	}
@@ -96,6 +114,11 @@ edid_test_property :: proc(ctx: rawptr, property_id, flags: u32, data: rawptr, d
 		if data_length != EDID_MAX_TRANSFER do return false
 		destination := cast([^]u8)data
 		copy(destination[:int(f.response_length)], f.response[:f.response_length])
+		if f.foreign_replies_remaining > 0 && f.response_length == 9 {
+			f.foreign_replies_remaining -= 1
+			stray := [9]u8{0x64, 4, 0xf0, 0x0c, 6, 0, 0, 0, 0}
+			copy(destination[:9], stray[:])
+		}
 		bytes_returned^ = u32(f.response_length)
 		if f.fault == .Truncated do bytes_returned^ = 0
 		if f.fault == .Fixed_Transfer do bytes_returned^ = EDID_MAX_TRANSFER
@@ -392,4 +415,252 @@ edid_uncertain_write_requires_explicit_refresh_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.edid.verification_required, u32(0))
 	testing.expect_value(t, r.edid.mode_known, u32(1))
 	testing.expect_value(t, EDID_Mode(r.edid.mode), EDID_Mode.Merged)
+}
+
+@(test)
+color_range_read_and_mapping_test :: proc(t: ^testing.T) {
+	values := [3]u8{0, 3, 4}
+	expected := [3]Color_Range{.Auto, .Expand, .Shrink}
+	for value, index in values {
+		fixture := EDID_Test_Transport{version = 4, color_range = value}
+		transport := edid_test_transport(&fixture)
+		range, error := edid_read_color_range(&transport)
+		testing.expect_value(t, error, EDID_Protocol_Error.None)
+		testing.expect_value(t, range, expected[index])
+		testing.expect_value(t, fixture.command_count, 2)
+		testing.expect_value(t, fixture.commands[0], EDID_COMMAND_PROTOCOL_VERSION)
+		testing.expect_value(t, fixture.commands[1], EDID_COMMAND_GET_COLOR_RANGE)
+	}
+	// Written independently of the encoder: service A1, selector 1, checksum.
+	request := [10]u8{0xa1, 7, 0, 0, 0x91, 0, 0, 0, 1, 0xc6}
+	fixture := EDID_Test_Transport{version = 4}
+	transport := edid_test_transport(&fixture)
+	_, error := edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, fixture.command_lengths[1], u16(len(request)))
+	for value, i in request do testing.expect_value(t, fixture.command_bytes[1][i], value)
+}
+
+@(test)
+color_range_reply_length_and_value_validation_test :: proc(t: ^testing.T) {
+	// The vendor reads only the first byte, so a one-byte reply is accepted.
+	fixture := EDID_Test_Transport{version = 4, color_range = 4, color_range_reply_length = 1}
+	transport := edid_test_transport(&fixture)
+	range, error := edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, range, Color_Range.Shrink)
+
+	fixture = {version = 4, color_range = 3, color_range_reply_length = -1}
+	transport = edid_test_transport(&fixture)
+	_, error = edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.Unexpected_Response_Length)
+
+	fixture = {version = 4, color_range = 3, color_range_reply_length = 5}
+	transport = edid_test_transport(&fixture)
+	_, error = edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.Unexpected_Response_Length)
+
+	fixture = {version = 4, color_range = 2}
+	transport = edid_test_transport(&fixture)
+	_, error = edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.Unknown_Color_Range)
+
+	fixture = {version = 3, color_range = 0}
+	transport = edid_test_transport(&fixture)
+	_, error = edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.Protocol_Version)
+	testing.expect_value(t, fixture.command_count, 1)
+}
+
+@(test)
+color_range_set_uses_framed_value_and_readback_test :: proc(t: ^testing.T) {
+	fixture := EDID_Test_Transport{version = 4, color_range = 0}
+	transport := edid_test_transport(&fixture)
+	actual, known, disposition, error := edid_set_color_range(&transport, .Expand)
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect(t, known)
+	testing.expect_value(t, actual, Color_Range.Expand)
+	testing.expect_value(t, disposition, EDID_Set_Disposition.Applied)
+	testing.expect_value(t, fixture.command_count, 5)
+	testing.expect_value(t, fixture.commands[2], EDID_COMMAND_SET_COLOR_RANGE)
+	testing.expect_value(t, fixture.commands[4], EDID_COMMAND_GET_COLOR_RANGE)
+	expected := [11]u8{0xa1, 8, 0, 0, 0x7c, 0, 0, 0, 1, 3, 0xd7}
+	testing.expect_value(t, fixture.command_lengths[2], u16(len(expected)))
+	for value, i in expected do testing.expect_value(t, fixture.command_bytes[2][i], value)
+
+	fixture = {version = 4, color_range = 4}
+	transport = edid_test_transport(&fixture)
+	_, _, disposition, error = edid_set_color_range(&transport, .Shrink)
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, disposition, EDID_Set_Disposition.Not_Applied)
+	testing.expect_value(t, fixture.command_count, 2)
+}
+
+@(test)
+color_range_distinguishes_failed_and_uncertain_writes_test :: proc(t: ^testing.T) {
+	fixture := EDID_Test_Transport{version = 4, color_range = 0, fault = .Length_Write}
+	transport := edid_test_transport(&fixture)
+	actual, known, disposition, error := edid_set_color_range(&transport, .Shrink)
+	testing.expect(t, known)
+	testing.expect_value(t, actual, Color_Range.Auto)
+	testing.expect_value(t, disposition, EDID_Set_Disposition.Not_Applied)
+	testing.expect_value(t, error, EDID_Protocol_Error.Length_Write_Failed)
+
+	fixture = {version = 4, color_range = 0, fault = .Data_Write}
+	transport = edid_test_transport(&fixture)
+	_, known, disposition, error = edid_set_color_range(&transport, .Shrink)
+	testing.expect(t, !known)
+	testing.expect_value(t, disposition, EDID_Set_Disposition.May_Have_Applied)
+	testing.expect_value(t, error, EDID_Protocol_Error.Write_Failed)
+
+	fixture = {version = 4, color_range = 0, fault = .Mismatch}
+	transport = edid_test_transport(&fixture)
+	actual, known, disposition, error = edid_set_color_range(&transport, .Shrink)
+	testing.expect(t, known)
+	testing.expect_value(t, actual, Color_Range.Auto)
+	testing.expect_value(t, disposition, EDID_Set_Disposition.Applied_Mismatch)
+	testing.expect_value(t, error, EDID_Protocol_Error.Readback_Mismatch)
+}
+
+@(test)
+color_range_result_leaves_edid_mode_and_capture_alone_test :: proc(t: ^testing.T) {
+	r := Renderer{capture_generation = 4, edid = {
+		status = u32(EDID_Availability.Ready),
+		mode = u32(EDID_Mode.Display),
+		mode_known = 1,
+	}}
+	renderer_publish_edid_result(&r, EDID_Result{
+		request_id = 1,
+		generation = 4,
+		kind = .Set_Color_Range,
+		color_range = .Auto,
+		color_range_known = true,
+		color_range_error = .Readback_Mismatch,
+		color_range_disposition = .Applied_Mismatch,
+	})
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Ready)
+	testing.expect_value(t, EDID_Mode(r.edid.mode), EDID_Mode.Display)
+	testing.expect_value(t, r.edid.mode_known, u32(1))
+	testing.expect_value(t, EDID_Set_Disposition(r.edid.result_disposition), EDID_Set_Disposition.Not_Applied)
+	testing.expect_value(t, EDID_Availability(r.edid.color_range_status), EDID_Availability.Ready)
+	testing.expect_value(t, Color_Range(r.edid.color_range), Color_Range.Auto)
+	testing.expect_value(t, EDID_Protocol_Error(r.edid.color_range_error), EDID_Protocol_Error.Readback_Mismatch)
+
+	r.edid.result_pending = 0
+	renderer_publish_edid_result(&r, EDID_Result{
+		request_id = 2,
+		generation = 4,
+		kind = .Set_Color_Range,
+		color_range_error = .Write_Failed,
+		color_range_disposition = .May_Have_Applied,
+	})
+	testing.expect_value(t, EDID_Availability(r.edid.color_range_status), EDID_Availability.Unknown)
+	testing.expect_value(t, r.edid.color_range_known, u32(0))
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Ready)
+
+	r.edid.result_pending = 0
+	renderer_publish_edid_result(&r, EDID_Result{
+		request_id = 3,
+		generation = 4,
+		kind = .Set,
+		mode = .Merged,
+		mode_known = true,
+		disposition = .Applied,
+	})
+	testing.expect_value(t, EDID_Availability(r.edid.color_range_status), EDID_Availability.Unknown)
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Reconnecting)
+}
+
+@(test)
+color_range_request_uses_shared_mailbox_test :: proc(t: ^testing.T) {
+	r := Renderer{ready = true, capture_ready = 1, capture_running = true, capture_generation = 2, edid = {
+		status = u32(EDID_Availability.Ready),
+		color_range_status = u32(EDID_Availability.Ready),
+		color_range_known = 1,
+		color_range = u32(Color_Range.Auto),
+	}}
+	r.capture_event = win32.CreateEventW(nil, false, false, nil)
+	if !testing.expect(t, r.capture_event != nil) do return
+	defer win32.CloseHandle(r.capture_event)
+	testing.expect(t, renderer_request_color_range(&r, .Auto))
+	testing.expect_value(t, EDID_Request_Kind(r.edid.request_kind), EDID_Request_Kind.None)
+
+	testing.expect(t, renderer_request_color_range(&r, .Expand))
+	testing.expect_value(t, EDID_Request_Kind(r.edid.request_kind), EDID_Request_Kind.Set_Color_Range)
+	testing.expect_value(t, Color_Range(r.edid.requested_color_range), Color_Range.Expand)
+	testing.expect_value(t, EDID_Availability(r.edid.color_range_status), EDID_Availability.Applying)
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Ready)
+	// One request at a time, shared with EDID mode changes.
+	testing.expect(t, !renderer_request_color_range(&r, .Shrink))
+	testing.expect(t, !renderer_request_edid_mode(&r, .Display))
+	testing.expect(t, !renderer_request_edid_refresh(&r))
+
+	r.edid.request_kind = u32(EDID_Request_Kind.None)
+	r.edid.color_range_status = u32(EDID_Availability.Error)
+	testing.expect(t, !renderer_request_color_range(&r, .Shrink))
+	testing.expect(t, renderer_request_edid_refresh(&r))
+	testing.expect_value(t, EDID_Availability(r.edid.color_range_status), EDID_Availability.Reading)
+	testing.expect_value(t, EDID_Availability(r.edid.status), EDID_Availability.Reading)
+}
+
+@(test)
+color_range_live_wire_fixtures_test :: proc(t: ^testing.T) {
+	// Captured on the connected PID 009B card, 2026-10-17, written
+	// independently of the encoder and mock transport.
+	get_request := [10]u8{0xa1, 7, 0, 0, 0x91, 0, 0, 0, 1, 0xc6}
+	set_auto_request := [11]u8{0xa1, 8, 0, 0, 0x7c, 0, 0, 0, 1, 0, 0xda}
+	expand_reply := [9]u8{0xa1, 6, 0, 0, 3, 0, 0, 0, 0x56}
+	auto_reply := [9]u8{0xa1, 6, 0, 0, 0, 0, 0, 0, 0x59}
+	set_reply := [3]u8{0xa1, 0, 0x5f}
+
+	selector := [1]u8{COLOR_RANGE_SELECTOR}
+	get_packet: [10]u8
+	length, error := edid_encode_request(EDID_COMMAND_GET_COLOR_RANGE, selector[:], get_packet[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, length, len(get_request))
+	testing.expect_value(t, get_packet, get_request)
+	payload := [2]u8{COLOR_RANGE_SELECTOR, COLOR_RANGE_DEVICE_VALUE[.Auto]}
+	set_packet: [11]u8
+	length, error = edid_encode_request(EDID_COMMAND_SET_COLOR_RANGE, payload[:], set_packet[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, length, len(set_auto_request))
+	testing.expect_value(t, set_packet, set_auto_request)
+
+	output: [4]u8
+	length, error = edid_decode_reply(EDID_COMMAND_GET_COLOR_RANGE, expand_reply[:], output[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, length, 4)
+	range, known := color_range_from_device(output[0])
+	testing.expect(t, known)
+	testing.expect_value(t, range, Color_Range.Expand)
+	length, error = edid_decode_reply(EDID_COMMAND_GET_COLOR_RANGE, auto_reply[:], output[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, output[0], COLOR_RANGE_DEVICE_VALUE[.Auto])
+	length, error = edid_decode_reply(EDID_COMMAND_SET_COLOR_RANGE, set_reply[:], output[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, length, 0)
+	// An exact-length caller still rejects the empty acknowledgement.
+	testing.expect_value(t, edid_decode_response(EDID_COMMAND_GET_MODE, set_reply[:], output[:]), EDID_Protocol_Error.Unexpected_Response_Length)
+	corrupted := set_reply
+	corrupted[2] = 0x60
+	_, error = edid_decode_reply(EDID_COMMAND_SET_COLOR_RANGE, corrupted[:], output[:])
+	testing.expect_value(t, error, EDID_Protocol_Error.Response_Checksum)
+}
+
+@(test)
+edid_read_retries_foreign_reply_test :: proc(t: ^testing.T) {
+	// Captured 2026-10-17 in place of a protocol-version reply.
+	fixture := EDID_Test_Transport{version = 4, color_range = 3, foreign_replies_remaining = 1}
+	transport := edid_test_transport(&fixture)
+	range, error := edid_read_color_range(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.None)
+	testing.expect_value(t, range, Color_Range.Expand)
+	testing.expect_value(t, fixture.command_count, 3)
+	testing.expect_value(t, fixture.commands[1], EDID_COMMAND_PROTOCOL_VERSION)
+
+	fixture = {mode = 4, version = 4, foreign_replies_remaining = 3}
+	transport = edid_test_transport(&fixture)
+	_, error = edid_read_mode(&transport)
+	testing.expect_value(t, error, EDID_Protocol_Error.Unexpected_Response_Length)
+	testing.expect_value(t, fixture.command_count, 3)
 }

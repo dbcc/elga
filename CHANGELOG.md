@@ -7,6 +7,8 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ### Fixed
 
+- Retry a read-only EDID query when the card returns a malformed reply, as it
+  has shortly after streaming started.
 - Preserve manual 30 FPS playback timing and audio delay across short capture
   gaps; replacement HDMI repeats retain their game-frame presentation slot.
 - Prevent stale enhancement status and queued frames after reconfiguration or
@@ -26,6 +28,9 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ### Added
 
+- Settings > HDMI color range reads and changes the card's Auto, Expand, or
+  Shrink input conversion over the same 4K X extension unit as the EDID mode.
+  Changes are confirmed by a separate read and never reconnect capture.
 - Remembered "Game frame rate: 30 FPS" override for frame generation of 30 FPS
   console games carried in 60 FPS capture streams, including nonidentical repeats.
 - Optional, independent RTX Video Super Resolution and frame-generation settings

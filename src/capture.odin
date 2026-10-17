@@ -194,6 +194,7 @@ capture_start :: proc(r: ^Renderer) -> bool {
 	sync.atomic_store_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Release)
 	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 	renderer_set_edid_state(r, .Reading, .None)
+	renderer_set_color_range_state(r, .Reading, .None)
 	r.capture_event = win32.CreateEventW(nil, false, false, nil)
 	if r.capture_event == nil {
 		fmt.eprintln("Capture control event creation failed")
@@ -265,6 +266,7 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	defer source_reader_detach(callback)
 	if !ok {
 		renderer_set_edid_state(r, .Unavailable, .Unsupported)
+		renderer_set_color_range_state(r, .Unavailable, .Unsupported)
 		fmt.eprintln("Elgato 4K X capture initialization failed")
 		return
 	}
@@ -278,7 +280,12 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 		edid_controller, edid_mode, edid_error, edid_available = edid_windows_open(source, r)
 	}
 	edid_transport := edid_windows_transport(&edid_controller)
-	renderer_publish_edid_open(r, generation, edid_available, edid_mode, edid_error, edid_controller.node_id)
+	color_range := Color_Range.Auto
+	color_range_error := EDID_Protocol_Error.Unsupported
+	if edid_available && edid_error == .None {
+		color_range, color_range_error = edid_read_color_range(&edid_transport)
+	}
+	renderer_publish_edid_open(r, generation, edid_available, edid_mode, edid_error, edid_controller.node_id, color_range, color_range_error)
 
 	if mode.width != r.resource_width || mode.height != r.resource_height {
 		fmt.eprintf("Capture/resource size mismatch: %dx%d vs %dx%d\n", mode.width, mode.height, r.resource_width, r.resource_height)
@@ -327,22 +334,41 @@ capture_service_edid_request :: proc(
 	result := EDID_Result{
 		request_id = sync.atomic_load_explicit(&r.edid.request_id, .Acquire),
 		generation = sync.atomic_load_explicit(&r.edid.request_generation, .Acquire),
+		kind = kind,
 	}
 	if result.generation != generation || !edid_available {
 		sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 		result.error = .Unsupported
+		result.color_range_error = .Unsupported
 		renderer_publish_edid_result(r, result)
 		return true
 	}
 	// KS transfers must not overlap an outstanding Media Foundation read.
 	if !capture_flush(r, callback, reader) {
 		result.error = .Transfer_Failed
-	} else if kind == .Refresh {
-		result.mode, result.error = edid_read_mode(transport)
-		result.mode_known = result.error == .None
+		result.color_range_error = .Transfer_Failed
 	} else {
-		requested := EDID_Mode(sync.atomic_load_explicit(&r.edid.requested_mode, .Acquire))
-		result.mode, result.mode_known, result.disposition, result.error = edid_set_mode(transport, requested)
+		switch kind {
+		case .None, .Refresh:
+			result.mode, result.error = edid_read_mode(transport)
+			result.mode_known = result.error == .None
+			// A transport or protocol failure would fail the color range read the
+			// same way, after the same retries.
+			result.color_range_error = result.error
+			if result.error == .None || result.error == .Unknown_Mode {
+				result.color_range, result.color_range_error = edid_read_color_range(transport)
+			}
+			result.color_range_known = result.color_range_error == .None
+		case .Set:
+			requested := EDID_Mode(sync.atomic_load_explicit(&r.edid.requested_mode, .Acquire))
+			result.mode, result.mode_known, result.disposition, result.error = edid_set_mode(transport, requested)
+		case .Set_Color_Range:
+			requested := Color_Range(sync.atomic_load_explicit(&r.edid.requested_color_range, .Acquire))
+			result.color_range, result.color_range_known, result.color_range_disposition, result.color_range_error = edid_set_color_range(transport, requested)
+			if result.color_range_error != .None {
+				fmt.eprintf("Color range change result: request=%d error=%v disposition=%v\n", result.request_id, result.color_range_error, result.color_range_disposition)
+			}
+		}
 	}
 	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 	renderer_publish_edid_result(r, result)
