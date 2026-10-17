@@ -385,7 +385,7 @@ void Session::run() {
     p.reset(); g.reset(); w.reset();
     CoUninitialize();
 }
-    void __cdecl query(ID3D11Device* device,VideoCaps* caps) {
+void __cdecl query(ID3D11Device* device,VideoCaps* caps) {
     if(!caps) return; *caps={0,ReasonRuntime,ReasonRuntime,0};
     ComPtr<IDXGIDevice> dx; ComPtr<IDXGIAdapter> adapter; DXGI_ADAPTER_DESC desc{};
     if(!device || FAILED(device->QueryInterface(IID_PPV_ARGS(&dx))) || FAILED(dx->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc))) return;

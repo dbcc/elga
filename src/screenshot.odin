@@ -72,7 +72,7 @@ screenshot_busy :: proc(s: ^Screenshot_State) -> bool {
 	return s.status == .Waiting || s.status == .Reading || s.status == .Saving
 }
 
-screenshot_status_text :: proc(s: ^Screenshot_State) -> string {
+screenshot_status_text :: proc(s: ^Screenshot_State) -> cstring {
 	switch s.status {
 	case .Idle: return "Save capture frame as PNG (F8)"
 	case .Waiting, .Reading, .Saving: return "Saving screenshot..."

@@ -51,7 +51,7 @@ Renderer :: struct {
 	target:         ^d3d11.IRenderTargetView,
 	allow_tearing:  bool,
 	video_texture:  ^d3d11.ITexture2D,
-	capture_texture:^d3d11.ITexture2D,
+	capture_texture: ^d3d11.ITexture2D,
 	processed_texture: ^d3d11.ITexture2D,
 	capture_mutex:  ^dxgi.IKeyedMutex,
 	render_mutex:   ^dxgi.IKeyedMutex,

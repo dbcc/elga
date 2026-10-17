@@ -517,7 +517,7 @@ imgui_build_capture_feedback :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	imgui.SetNextWindowSizeConstraints({0, 0}, {max(100*s, f32(r.width)-32*s), 160*s})
 	imgui.SetNextWindowBgAlpha(0.94)
 	imgui.Begin("##screenshot_feedback", nil, imgui.WindowFlags_NoDecoration | imgui.WindowFlags_NoInputs | {.AlwaysAutoResize, .NoSavedSettings, .NoFocusOnAppearing})
-	imgui.TextWrappedUnformatted(fmt.ctprintf("%s", screenshot_status_text(&app.screenshot)))
+	imgui.TextWrappedUnformatted(screenshot_status_text(&app.screenshot))
 	imgui.End()
 }
 

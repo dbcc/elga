@@ -191,7 +191,7 @@ app is unaffected.
 
 ### Saved settings
 
-Both files are written next to the executable, so the app stays portable.
+All three files are written next to the executable, so the app stays portable.
 
 | File | Contents |
 | --- | --- |

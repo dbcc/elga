@@ -9,6 +9,38 @@ import win32 "core:sys/windows"
 WINDOW_LAYOUT_FILE :: "elga-window.ini"
 WINDOW_LAYOUT_MAX_COORD :: 1_000_000
 
+// Every [window] key is required exactly once.
+Window_Layout_Key :: enum {
+	Version,
+	X,
+	Y,
+	Width,
+	Height,
+	Work_X,
+	Work_Y,
+	Work_Width,
+	Work_Height,
+	DPI,
+	Always_On_Top,
+	Monitor,
+}
+
+@(rodata)
+WINDOW_LAYOUT_KEY_NAME := [Window_Layout_Key]string{
+	.Version       = "version",
+	.X             = "x",
+	.Y             = "y",
+	.Width         = "width",
+	.Height        = "height",
+	.Work_X        = "work_x",
+	.Work_Y        = "work_y",
+	.Work_Width    = "work_width",
+	.Work_Height   = "work_height",
+	.DPI           = "dpi",
+	.Always_On_Top = "always_on_top",
+	.Monitor       = "monitor",
+}
+
 Window_Layout :: struct {
 	rect:          win32.RECT,
 	work:          win32.RECT,
@@ -215,18 +247,16 @@ window_layout_format :: proc(buffer: []byte, layout: Window_Layout) -> string {
 
 window_layout_parse :: proc(data: string) -> (layout: Window_Layout, ok: bool) {
 	if len(data) > 4096 do return {}, false
-	keys := [12]string{"version", "x", "y", "width", "height", "work_x", "work_y", "work_width", "work_height", "dpi", "always_on_top", "monitor"}
-	values: [11]i32
-	seen: u32
+	values: [Window_Layout_Key]i32
+	seen: bit_set[Window_Layout_Key]
 	it := Ini_Iterator{data = data, section = "[window]"}
 	for key, value in ini_next(&it) {
 		if key == "" do return {}, false
-		for expected, index in keys {
-			if key != expected do continue
-			bit := u32(1)<<u32(index)
-			if seen & bit != 0 do return {}, false
-			seen |= bit
-			if index == 11 {
+		for name, field in WINDOW_LAYOUT_KEY_NAME {
+			if key != name do continue
+			if field in seen do return {}, false
+			seen += {field}
+			if field == .Monitor {
 				if len(value) == 0 || len(value) >= len(layout.monitor) do return {}, false
 				for ch, char_index in transmute([]byte)value {
 					if ch < 32 || ch > 126 do return {}, false
@@ -235,19 +265,19 @@ window_layout_parse :: proc(data: string) -> (layout: Window_Layout, ok: bool) {
 			} else {
 				parsed, valid := strconv.parse_int(value, 10)
 				if !valid || parsed < -WINDOW_LAYOUT_MAX_COORD || parsed > WINDOW_LAYOUT_MAX_COORD do return {}, false
-				values[index] = i32(parsed)
+				values[field] = i32(parsed)
 			}
 			break
 		}
 	}
-	if seen != (u32(1)<<12)-1 || values[0] != 1 || values[3] <= 0 || values[4] <= 0 ||
-	   values[7] <= 0 || values[8] <= 0 || values[9] < 48 || values[9] > 960 ||
-	   (values[10] != 0 && values[10] != 1) {
+	if card(seen) != len(Window_Layout_Key) || values[.Version] != 1 || values[.Width] <= 0 || values[.Height] <= 0 ||
+	   values[.Work_Width] <= 0 || values[.Work_Height] <= 0 || values[.DPI] < 48 || values[.DPI] > 960 ||
+	   (values[.Always_On_Top] != 0 && values[.Always_On_Top] != 1) {
 		return {}, false
 	}
-	layout.rect = win32.RECT{values[1], values[2], values[1]+values[3], values[2]+values[4]}
-	layout.work = win32.RECT{values[5], values[6], values[5]+values[7], values[6]+values[8]}
-	layout.dpi = u32(values[9])
-	layout.always_on_top = values[10] == 1
+	layout.rect = win32.RECT{values[.X], values[.Y], values[.X]+values[.Width], values[.Y]+values[.Height]}
+	layout.work = win32.RECT{values[.Work_X], values[.Work_Y], values[.Work_X]+values[.Work_Width], values[.Work_Y]+values[.Work_Height]}
+	layout.dpi = u32(values[.DPI])
+	layout.always_on_top = values[.Always_On_Top] == 1
 	return layout, window_layout_valid(layout)
 }

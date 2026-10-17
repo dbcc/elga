@@ -216,9 +216,17 @@ video_enhancements_reset :: proc(r: ^Renderer) {
 	e.original_fps, e.generated_fps = 0, 0
 	e.rate_start = 0
 	e.rate_original, e.rate_generated = e.original_presented, e.generated_presented
-	if e.timer != nil do CancelWaitableTimer(e.timer)
-	if e.timer != nil && !e.preferences.frame_generation { win32.CloseHandle(e.timer); e.timer = nil }
-	if e.session != nil { disabled := Video_Config{generation = e.generation, retry = e.retry}; e.api.configure(e.session, &disabled) }
+	if e.timer != nil {
+		CancelWaitableTimer(e.timer)
+		if !e.preferences.frame_generation {
+			win32.CloseHandle(e.timer)
+			e.timer = nil
+		}
+	}
+	if e.session != nil {
+		disabled := Video_Config{generation = e.generation, retry = e.retry}
+		e.api.configure(e.session, &disabled)
+	}
 	video_enhancements_reset_audio(e)
 }
 
@@ -253,7 +261,10 @@ video_display_refresh :: proc(r: ^Renderer) -> f64 {
 video_enhancements_prepare :: proc(r: ^Renderer) {
 	e := &r.enhancements
 	requested := (u32(VIDEO_VSR) if e.preferences.super_resolution else 0) | (u32(VIDEO_FRUC) if e.preferences.frame_generation else 0)
-	if requested == 0 { e.status = {}; return }
+	if requested == 0 {
+		e.status = {}
+		return
+	}
 	if e.stalled || e.output_failed do return
 	video_backend_load(r)
 	if !e.loaded || e.caps.supported&requested == 0 {
@@ -349,7 +360,9 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 		if e.status.next_deadline > 0 {
 			due := win32.LARGE_INTEGER(-max(e.status.next_deadline-video_now(), 1))
 			win32.SetWaitableTimerEx(e.timer, &due, 0, nil, nil, nil, 0)
-		} else { CancelWaitableTimer(e.timer) }
+		} else {
+			CancelWaitableTimer(e.timer)
+		}
 	}
 	if e.status.vsr_state != .Active && e.status.fruc_state != .Active do video_enhancements_clear_cache(r)
 	if e.timer == nil && e.preferences.frame_generation do e.status.fruc_state, e.status.fruc_reason = .Paused, .Device
@@ -417,7 +430,11 @@ video_enhancements_presented :: proc(r: ^Renderer) {
 	e := &r.enhancements
 	if e.cached.token == 0 || e.cached.token == e.presented_token do return
 	e.presented_token = e.cached.token
-	if e.cached.generated != 0 { e.generated_presented += 1 } else { e.original_presented += 1 }
+	if e.cached.generated != 0 {
+		e.generated_presented += 1
+	} else {
+		e.original_presented += 1
+	}
 	now := video_now()
 	if e.rate_start == 0 do e.rate_start = now
 	if now-e.rate_start >= VIDEO_TICKS_PER_SECOND/2 {

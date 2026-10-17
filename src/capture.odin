@@ -81,7 +81,7 @@ source_reader_callback_vtable := IMFSourceReaderCallback_VTable {
 source_reader_query_interface :: proc "system" (this: ^win32.IUnknown, iid: win32.REFIID, object: ^rawptr) -> win32.HRESULT {
 	E_NOINTERFACE :: win32.HRESULT(-2147467262)
 	if object == nil || iid == nil do return E_NOINTERFACE
-	if iid^ != IID_IUnknown_Value && iid^ != IID_IMFSourceReaderCallback_Value {
+	if iid^ != win32.IUnknown_UUID^ && iid^ != IID_IMFSourceReaderCallback_Value {
 		object^ = nil
 		return E_NOINTERFACE
 	}

@@ -343,20 +343,18 @@ edid_query_command :: proc(transport: ^EDID_Transport, command: u32, output: []u
 	return error
 }
 
-edid_query_reply :: proc(transport: ^EDID_Transport, command: u32, input, output: []u8) -> (int, EDID_Protocol_Error) {
-	length := 0
-	error := EDID_Protocol_Error.None
+EDID_RETRYABLE_ERRORS :: bit_set[EDID_Protocol_Error]{
+	.Response_Timeout, .Transfer_Failed, .Length_Write_Failed, .Write_Failed,
+	.Response_Header, .Response_Checksum, .Unexpected_Response_Length,
+}
+
+// edid_command_reply returns a zero length with every error.
+edid_query_reply :: proc(transport: ^EDID_Transport, command: u32, input, output: []u8) -> (length: int, error: EDID_Protocol_Error) {
 	for _ in 0..<EDID_READ_ATTEMPTS {
 		length, error = edid_command_reply(transport, command, input, output)
-		if error == .None || error == .Cancelled do return length, error
-		if error != .Response_Timeout && error != .Transfer_Failed &&
-		   error != .Length_Write_Failed && error != .Write_Failed &&
-		   error != .Response_Header && error != .Response_Checksum &&
-		   error != .Unexpected_Response_Length {
-			return 0, error
-		}
+		if error not_in EDID_RETRYABLE_ERRORS do break
 	}
-	return 0, error
+	return
 }
 
 edid_read_mode :: proc(transport: ^EDID_Transport) -> (EDID_Mode, EDID_Protocol_Error) {
