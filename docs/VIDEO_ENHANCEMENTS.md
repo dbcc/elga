@@ -4,6 +4,12 @@ Settings > Video enhancements contains independent **RTX Video Super Resolution*
 and **Frame generation (2x)** toggles, both off initially. Preferences persist in
 `elga-video.ini` beside the executable. These are video APIs, not game DLSS.
 
+DLSS Super Resolution requires engine-provided depth and motion-vector buffers
+and per-frame camera constants, as described in NVIDIA's
+[DLSS integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS.md).
+Elga receives finished capture frames without those inputs, so this capture
+pipeline cannot provide a supported DLSS Super Resolution integration.
+
 ## Validation status
 
 The backend now builds against the official RTX Video SDK 1.1.0 and Optical Flow
@@ -17,9 +23,9 @@ HDR-source behavior, and 4K combined throughput remain unverified. These tests
 exercise the production backend and GPU readback, not a physical display or capture
 card. They do not establish support or performance for other GPU/driver combinations.
 
-Measured on 2026-09-17, RTX 5090 / driver 616.92, using three-second scrolling
-texture sequences after initialization. All cases had zero reported deadline
-misses. Output counts exclude frames still buffered at the end of the run.
+Measured at VSR Medium quality on 2026-09-17, RTX 5090 / driver 616.92, using
+three-second scrolling texture sequences after initialization. All cases had zero
+reported deadline misses. Output counts exclude frames still buffered at the end of the run.
 
 | Case | Original / generated outputs | Mean worker time |
 | --- | --- | --- |
@@ -94,7 +100,7 @@ restart; Elga does not copy frames between adapters.
 ## Behavior
 
 - VSR scales to the video viewport, capped at 4K, and bypasses native-size or
-  smaller viewports. Quality is Medium (level 2): SDK headers expose discrete
+  smaller viewports. Quality is Ultra (level 4): SDK headers expose discrete
   levels rather than an automatic default. HDR conversion is disabled.
 - Frame generation runs at capture resolution, followed by VSR when enabled.
   Display refresh must support twice the established source cadence, with a

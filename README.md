@@ -136,7 +136,7 @@ If none is found, video still works but audio is unavailable.
 - **Video enhancements**: all three options start off, and the choices are
   saved.
   - **RTX Video Super Resolution** upscales the video to the window size, up to
-    4K.
+    4K, using Ultra quality (level 4).
   - **Frame generation (2x)** interpolates frames. It adds about 33 ms of
     latency at 60 FPS, or 67 ms at 30 FPS, and delays the audio to match. Your
     display must support twice the source frame rate.

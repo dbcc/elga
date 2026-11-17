@@ -132,7 +132,7 @@ struct Nvidia final : Provider {
         params->Set(NVSDK_NGX_Parameter_Rect_W,a.Width); params->Set(NVSDK_NGX_Parameter_Rect_H,a.Height);
         params->Set(NVSDK_NGX_Parameter_OutRect_X,0u); params->Set(NVSDK_NGX_Parameter_OutRect_Y,0u);
         params->Set(NVSDK_NGX_Parameter_OutRect_W,b.Width); params->Set(NVSDK_NGX_Parameter_OutRect_H,b.Height);
-        params->Set(NVSDK_NGX_Parameter_VSR_QualityLevel,unsigned(NVSDK_NGX_VSR_Quality_Medium));
+        params->Set(NVSDK_NGX_Parameter_VSR_QualityLevel,unsigned(NVSDK_NGX_VSR_Quality_Ultra));
         return NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D11_EvaluateFeature(context.Get(),vsr,params,nullptr));
 #else
         (void)input; (void)output; return false;

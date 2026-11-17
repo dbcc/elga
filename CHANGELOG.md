@@ -28,6 +28,7 @@ Notable changes to Elga Camera are documented here. The project follows
 
 ### Changed
 
+- Raise RTX Video Super Resolution quality from Medium (level 2) to Ultra (level 4).
 - Skip the unused HDMI repeat's color conversion when the 30 FPS override is active.
 - Reduce duplicate-comparison atomic contention and omit unused history textures.
   SR-only processing uses three output textures instead of eight.
