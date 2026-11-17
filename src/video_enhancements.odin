@@ -58,8 +58,15 @@ Video_API :: struct {
 	release: proc "c" (rawptr, u64),
 	destroy: proc "c" (rawptr),
 }
-Video_Preferences :: struct { super_resolution, frame_generation, game_30_fps: bool }
 Video_Preference :: enum { Super_Resolution, Frame_Generation, Game_30_FPS }
+Video_Preferences :: bit_set[Video_Preference]
+
+@(rodata)
+VIDEO_PREFERENCE_KEY := [Video_Preference]string{
+	.Super_Resolution = "super_resolution",
+	.Frame_Generation = "frame_generation",
+	.Game_30_FPS      = "game_30_fps",
+}
 Video_Enhancements :: struct {
 	preferences: Video_Preferences,
 	loaded, load_attempted, save_failed: bool,
@@ -109,10 +116,8 @@ video_now :: proc() -> i64 {
 video_preferences_parse :: proc(data: string) -> (p: Video_Preferences) {
 	it := Ini_Iterator{data = data, section = "[video]"}
 	for key, value in ini_next(&it) {
-		switch key {
-		case "super_resolution": p.super_resolution = value == "1"
-		case "frame_generation": p.frame_generation = value == "1"
-		case "game_30_fps":      p.game_30_fps = value == "1"
+		for name, preference in VIDEO_PREFERENCE_KEY {
+			if key == name do p = p + {preference} if value == "1" else p - {preference}
 		}
 	}
 	return
@@ -120,8 +125,11 @@ video_preferences_parse :: proc(data: string) -> (p: Video_Preferences) {
 
 video_preferences_save_to :: proc(p: Video_Preferences, path, temporary: string) -> bool {
 	buffer: [128]byte
-	data := fmt.bprintf(buffer[:], "[video]\r\nsuper_resolution=%d\r\nframe_generation=%d\r\ngame_30_fps=%d\r\n", int(p.super_resolution), int(p.frame_generation), int(p.game_30_fps))
-	return settings_write(path, temporary, data)
+	length := len(fmt.bprint(buffer[:], "[video]\r\n"))
+	for name, preference in VIDEO_PREFERENCE_KEY {
+		length += len(fmt.bprintf(buffer[length:], "%s=%d\r\n", name, int(preference in p)))
+	}
+	return settings_write(path, temporary, string(buffer[:length]))
 }
 
 video_enhancements_init :: proc(e: ^Video_Enhancements, audio: ^Audio_State) {
@@ -136,8 +144,8 @@ video_enhancements_init :: proc(e: ^Video_Enhancements, audio: ^Audio_State) {
 
 // Shows each enabled effect in state and each disabled one as Off.
 video_status_set :: proc(e: ^Video_Enhancements, state: Video_Effect_State, vsr_reason := Video_Effect_Reason.None, fruc_reason := Video_Effect_Reason.None) {
-	e.status.vsr_state = state if e.preferences.super_resolution else .Off
-	e.status.fruc_state = state if e.preferences.frame_generation else .Off
+	e.status.vsr_state = state if .Super_Resolution in e.preferences else .Off
+	e.status.fruc_state = state if .Frame_Generation in e.preferences else .Off
 	e.status.vsr_reason, e.status.fruc_reason = vsr_reason, fruc_reason
 }
 
@@ -191,11 +199,7 @@ video_backend_open :: proc(e: ^Video_Enhancements) {
 
 video_enhancements_toggle :: proc(r: ^Renderer, preference: Video_Preference) {
 	e := &r.enhancements
-	switch preference {
-	case .Super_Resolution: e.preferences.super_resolution = !e.preferences.super_resolution
-	case .Frame_Generation: e.preferences.frame_generation = !e.preferences.frame_generation
-	case .Game_30_FPS: e.preferences.game_30_fps = !e.preferences.game_30_fps
-	}
+	e.preferences ~= {preference}
 	e.retry += 1
 	path, temporary, ok := settings_paths(VIDEO_SETTINGS_FILE)
 	e.save_failed = !ok || !video_preferences_save_to(e.preferences, path, temporary)
@@ -228,7 +232,7 @@ video_enhancements_reset :: proc(r: ^Renderer) {
 	e.rate_original, e.rate_generated = e.original_presented, e.generated_presented
 	if e.timer != nil {
 		CancelWaitableTimer(e.timer)
-		if !e.preferences.frame_generation {
+		if .Frame_Generation not_in e.preferences {
 			win32.CloseHandle(e.timer)
 			e.timer = nil
 		}
@@ -284,7 +288,7 @@ video_display_refresh :: proc(r: ^Renderer) -> f64 {
 
 video_enhancements_prepare :: proc(r: ^Renderer) {
 	e := &r.enhancements
-	requested := (u32(VIDEO_VSR) if e.preferences.super_resolution else 0) | (u32(VIDEO_FRUC) if e.preferences.frame_generation else 0)
+	requested := (u32(VIDEO_VSR) if .Super_Resolution in e.preferences else 0) | (u32(VIDEO_FRUC) if .Frame_Generation in e.preferences else 0)
 	if requested == 0 {
 		e.status = {}
 		return
@@ -302,7 +306,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 			return
 		}
 	}
-	if e.preferences.frame_generation && e.timer == nil {
+	if .Frame_Generation in e.preferences && e.timer == nil {
 		// High-resolution timers need Windows 10 1803; fall back to a standard one.
 		e.timer = win32.CreateWaitableTimerExW(nil, nil, win32.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, win32.TIMER_ALL_ACCESS)
 		if e.timer == nil do e.timer = win32.CreateWaitableTimerExW(nil, nil, 0, win32.TIMER_ALL_ACCESS)
@@ -321,7 +325,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 	output_height := min(u32(view.Height), u32(2160))
 	// Frame generation never depends on window size. Avoid rebuilding its device,
 	// SDK session and history on every resize or toolbar visibility change.
-	if !e.preferences.super_resolution || output_width <= r.resource_width || output_height <= r.resource_height {
+	if .Super_Resolution not_in e.preferences || output_width <= r.resource_width || output_height <= r.resource_height {
 		output_width, output_height = r.resource_width, r.resource_height
 	}
 	capture_generation := sync.atomic_load_explicit(&r.capture_generation, .Acquire)
@@ -331,7 +335,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 		requested = requested, generation = e.generation,
 		fps_num = r.mode.fps_num, fps_den = max(r.mode.fps_den, 1),
 		refresh_hz = e.refresh_hz,
-		game_fps = 30 if e.preferences.game_30_fps else 0,
+		game_fps = 30 if .Game_30_FPS in e.preferences else 0,
 		retry = e.retry,
 	}
 	if config != e.config || capture_generation != e.capture_generation {
@@ -389,7 +393,7 @@ video_enhancements_prepare :: proc(r: ^Renderer) {
 		}
 	}
 	if e.status.vsr_state != .Active && e.status.fruc_state != .Active do video_enhancements_clear_cache(r)
-	if e.timer == nil && e.preferences.frame_generation do e.status.fruc_state, e.status.fruc_reason = .Paused, .Device
+	if e.timer == nil && .Frame_Generation in e.preferences do e.status.fruc_state, e.status.fruc_reason = .Paused, .Device
 	// No enhanced presentation for a second: report zero rather than a stale rate.
 	if e.rate_start != 0 && now-e.rate_start >= VIDEO_TICKS_PER_SECOND {
 		e.original_fps, e.generated_fps = 0, 0
@@ -417,14 +421,19 @@ video_enhancements_health_tick :: proc(r: ^Renderer) {
 	}
 }
 
+// Effect states that still submit frames. Frame generation keeps measuring the
+// source cadence while Not_Needed, since a lower rate may make it needed.
+VIDEO_SR_WORKING_STATES :: bit_set[Video_Effect_State]{.Active, .Starting}
+VIDEO_FG_WORKING_STATES :: bit_set[Video_Effect_State]{.Active, .Starting, .Not_Needed}
+
 video_enhancements_submit :: proc(r: ^Renderer, sequence: u64) {
 	e := &r.enhancements
 	if e.session == nil || e.config.requested == 0 || sequence == e.submitted_sequence do return
 	// Continue cadence discovery on a slow display: repeated HDMI frames may
 	// establish a lower source rate that this display can double. Paused/failed
 	// effects, however, must not keep doing GPU work until explicitly retried.
-	sr_work := e.status.vsr_state == .Active || e.status.vsr_state == .Starting
-	fg_work := e.status.fruc_state == .Active || e.status.fruc_state == .Starting || e.status.fruc_state == .Not_Needed
+	sr_work := e.status.vsr_state in VIDEO_SR_WORKING_STATES
+	fg_work := e.status.fruc_state in VIDEO_FG_WORKING_STATES
 	if !sr_work && !fg_work do return
 	frame := Video_Frame{sequence = sequence, timestamp = r.video_timestamp, arrival = r.video_arrival,
 		generation = e.generation, flipped = sync.atomic_load_explicit(&r.video_vertical_flip, .Acquire)}

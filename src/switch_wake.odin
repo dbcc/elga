@@ -53,17 +53,19 @@ WAKE_ERROR_REASON := [Wake_Error]cstring{
 }
 
 // Status fields are written by the worker threads and read by the window thread.
+// Acquire status before reading result details; online/health_checked publish
+// health details. The detail fields themselves use relaxed atomic accesses.
 Wake_Control :: struct {
 	initialized:      bool,
 	request_thread:   ^thread.Thread,
 	health_thread:    ^thread.Thread,
 	health_event:     win32.HANDLE,
-	status:           u32,
-	error:            u32,
+	status:           Wake_Status,
+	error:            Wake_Error,
 	http_status:      u32,
 	online:           u32,
 	health_checked:   u32,
-	health_error:     u32,
+	health_error:     Wake_Error,
 	health_http_status: u32,
 	cancel_requested: u32,
 	generation:       u32,
@@ -170,11 +172,12 @@ wake_expire_result :: proc(w: ^Wake_Control, now: time.Time) -> bool {
 }
 
 wake_get_status :: proc(w: ^Wake_Control) -> Wake_Status {
-	return Wake_Status(sync.atomic_load_explicit(&w.status, .Acquire))
+	return sync.atomic_load_explicit(&w.status, .Acquire)
 }
 
+// Caller acquires status through wake_get_status before reading this payload.
 wake_get_error :: proc(w: ^Wake_Control) -> Wake_Error {
-	return Wake_Error(sync.atomic_load_explicit(&w.error, .Acquire))
+	return sync.atomic_load_explicit(&w.error, .Relaxed)
 }
 
 wake_is_online :: proc(w: ^Wake_Control) -> bool {
@@ -187,8 +190,8 @@ wake_tooltip :: proc(w: ^Wake_Control) -> cstring {
 	}
 	if !wake_is_online(w) {
 		if sync.atomic_load_explicit(&w.health_checked, .Acquire) == 0 do return "Checking Switch 2 wake beacon..."
-		error := Wake_Error(sync.atomic_load_explicit(&w.health_error, .Acquire))
-		return fmt.ctprintf("Wake unavailable: %s", reason(error, sync.atomic_load_explicit(&w.health_http_status, .Acquire)))
+		error := sync.atomic_load_explicit(&w.health_error, .Relaxed)
+		return fmt.ctprintf("Wake unavailable: %s", reason(error, sync.atomic_load_explicit(&w.health_http_status, .Relaxed)))
 	}
 	switch wake_get_status(w) {
 	case .Unavailable: return "Switch wake is unavailable"
@@ -196,21 +199,21 @@ wake_tooltip :: proc(w: ^Wake_Control) -> cstring {
 	case .Sending:     return "Sending Switch 2 wake request..."
 	case .Success:     return "Switch 2 wake request sent"
 	case .Failed:
-		return fmt.ctprintf("Switch wake failed: %s", reason(wake_get_error(w), sync.atomic_load_explicit(&w.http_status, .Acquire)))
+		return fmt.ctprintf("Switch wake failed: %s", reason(wake_get_error(w), sync.atomic_load_explicit(&w.http_status, .Relaxed)))
 	}
 	return ""
 }
 
 wake_set_result :: proc(w: ^Wake_Control, status: Wake_Status, error: Wake_Error, http_status: u32 = 0) {
 	sync.atomic_store_explicit(&w.http_status, http_status, .Relaxed)
-	sync.atomic_store_explicit(&w.error, u32(error), .Relaxed)
-	sync.atomic_store_explicit(&w.status, u32(status), .Release)
+	sync.atomic_store_explicit(&w.error, error, .Relaxed)
+	sync.atomic_store_explicit(&w.status, status, .Release)
 	sync.atomic_add_explicit(&w.generation, 1, .Release)
 }
 
 wake_set_health :: proc(w: ^Wake_Control, online: bool, error: Wake_Error, http_status: u32 = 0) {
 	sync.atomic_store_explicit(&w.health_http_status, http_status, .Relaxed)
-	sync.atomic_store_explicit(&w.health_error, u32(error), .Relaxed)
+	sync.atomic_store_explicit(&w.health_error, error, .Relaxed)
 	sync.atomic_store_explicit(&w.online, 1 if online else 0, .Release)
 	sync.atomic_store_explicit(&w.health_checked, 1, .Release)
 	sync.atomic_add_explicit(&w.generation, 1, .Release)

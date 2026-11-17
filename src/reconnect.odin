@@ -63,7 +63,7 @@ renderer_update_reconnect :: proc(r: ^Renderer) -> bool {
 	renderer_apply_capture_configuration(r, config)
 	r.reconnect_error = !r.ready || !sync.atomic_load_explicit(&r.capture_running, .Acquire)
 	if r.reconnect_error && sync.atomic_load_explicit(&r.edid.restore_pending, .Acquire) != 0 {
-		sync.atomic_store_explicit(&r.edid.status, u32(EDID_Availability.Applied_Capture_Unavailable), .Release)
+		sync.atomic_store_explicit(&r.edid.status, EDID_Availability.Applied_Capture_Unavailable, .Release)
 	}
 	renderer_request_redraw(r)
 	return true

@@ -80,7 +80,7 @@ capture_gpu_roundtrip :: proc(t: ^testing.T) {
 			source: ^d3d11.ITexture2D
 			source_desc := d3d11.TEXTURE2D_DESC{
 				Width = u32(source_width), Height = u32(source_height), MipLevels = 1, ArraySize = 1,
-				Format = capture_format_dxgi(format), SampleDesc = {Count = 1}, Usage = .DEFAULT,
+				Format = CAPTURE_FORMAT_DXGI[format], SampleDesc = {Count = 1}, Usage = .DEFAULT,
 			}
 			pitch, valid := capture_upload_pitch(format, u32(source_width), u32(source_height), 0, u32(length))
 			if !testing.expect(t, valid) do return

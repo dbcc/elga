@@ -85,7 +85,7 @@ Renderer :: struct {
 	// Negotiated by the capture thread before capture_ready; zero until then.
 	mode:            Capture_Mode,
 	using config:    Capture_Config,
-	capture_formats: u32,
+	capture_formats: Capture_Formats,
 	capture_mode_indices: [MAX_CAPTURE_MODES]u16,
 	capture_mode_count: u32,
 	source_modes:    [MAX_CAPTURE_MODES]Capture_Mode,
@@ -144,8 +144,8 @@ renderer_init :: proc(r: ^Renderer, hwnd: win32.HWND, width, height: u32) -> (su
 	r.hwnd = hwnd
 	r.capture_format = .NV12
 	r.format_auto = true
-	sync.atomic_store_explicit(&r.edid.status, u32(EDID_Availability.Unavailable), .Relaxed)
-	sync.atomic_store_explicit(&r.capture_formats, u32(1)<<u32(Capture_Format.NV12), .Relaxed)
+	sync.atomic_store_explicit(&r.edid.status, EDID_Availability.Unavailable, .Relaxed)
+	sync.atomic_store_explicit(&r.capture_formats, Capture_Formats{.NV12}, .Relaxed)
 	r.fps_window_start = time.now()
 	if !renderer_create_device_objects(r, width, height) do return false
 	if !video_resources_create(r, r.capture_format, CAPTURE_AUTO_WIDTH, CAPTURE_AUTO_HEIGHT) do return false
@@ -456,7 +456,7 @@ video_resources_create :: proc(r: ^Renderer, format: Capture_Format, width, heig
 			Height     = height,
 			MipLevels  = 1,
 			ArraySize  = 1,
-			Format     = capture_format_dxgi(format),
+			Format     = CAPTURE_FORMAT_DXGI[format],
 			SampleDesc = {Count = 1},
 			Usage      = .DEFAULT,
 			// BindFlags=0 is explicitly valid for a video-processor input view.
@@ -573,17 +573,16 @@ video_processor_set_color :: proc(r: ^Renderer) {
 	r.video_context.VideoProcessorSetStreamColorSpace(r.video_context, r.video_processor, 0, &input_color)
 }
 
-capture_format_dxgi :: proc(format: Capture_Format) -> dxgi.FORMAT {
-	switch format {
-	case .NV12: return .NV12
-	case .P010: return .P010
-	case .YUY2: return .YUY2
-	case .RGB24: return .B8G8R8A8_UNORM
-	// Planar I420 and compressed MJPEG are converted/decoded to NV12 by Media
-	// Foundation before entering the D3D11 video-processor path.
-	case .I420, .MJPEG: return .NV12
-	}
-	return .UNKNOWN
+// Planar I420 and compressed MJPEG are converted/decoded to NV12 by Media
+// Foundation before entering the D3D11 video-processor path.
+@(rodata)
+CAPTURE_FORMAT_DXGI := [Capture_Format]dxgi.FORMAT{
+	.NV12  = .NV12,
+	.P010  = .P010,
+	.YUY2  = .YUY2,
+	.I420  = .NV12,
+	.RGB24 = .B8G8R8A8_UNORM,
+	.MJPEG = .NV12,
 }
 
 compile_shader :: proc(entry, target: cstring) -> ^d3dc.ID3DBlob {
@@ -749,7 +748,7 @@ renderer_set_capture_resolution :: proc(r: ^Renderer, width, height: u32) {
 	}
 	if config.requested_width == r.requested_width && config.requested_height == r.requested_height do return
 	if r.format_auto {
-		if preferred, found := capture_pick_auto_format(r, config.requested_width, config.requested_height); found do config.capture_format = preferred
+		config.capture_format = capture_pick_auto_format(r, config.requested_width, config.requested_height) or_else config.capture_format
 	}
 	renderer_apply_capture_configuration(r, config)
 }

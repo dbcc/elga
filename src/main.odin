@@ -133,7 +133,7 @@ main :: proc() {
 	for {
 		// Generated frames have deadlines between capture arrivals. Drain queued
 		// input first, then wait for either messages or the presentation timer.
-		if app.renderer.enhancements.timer != nil && app.renderer.enhancements.preferences.frame_generation {
+		if app.renderer.enhancements.timer != nil && .Frame_Generation in app.renderer.enhancements.preferences {
 			if !win32.PeekMessageW(&msg, nil, 0, 0, win32.PM_REMOVE) {
 				handles := [1]win32.HANDLE{app.renderer.enhancements.timer}
 				result := win32.MsgWaitForMultipleObjects(1, &handles[0], false, win32.INFINITE, win32.QS_ALLINPUT)

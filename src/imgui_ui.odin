@@ -309,13 +309,13 @@ imgui_build_settings :: proc(ui: ^ImGui_State, r: ^Renderer) {
 	}
 	if imgui.BeginMenu("Video enhancements") {
 		e := &r.enhancements
-		if imgui.MenuItem("RTX Video Super Resolution", nil, e.preferences.super_resolution) do post_ui_action(.Video_Super_Resolution)
+		if imgui.MenuItem("RTX Video Super Resolution", nil, .Super_Resolution in e.preferences) do post_ui_action(.Video_Super_Resolution)
 		ui_item_tooltip(ui, "Upscale captured video on a supported NVIDIA GPU. Requires the optional enhancement add-on.")
 		imgui.TextDisabledUnformatted(video_enhancement_text(e.status.vsr_state, e.status.vsr_reason))
-		if imgui.MenuItem("Frame generation (2x)", nil, e.preferences.frame_generation) do post_ui_action(.Video_Frame_Generation)
+		if imgui.MenuItem("Frame generation (2x)", nil, .Frame_Generation in e.preferences) do post_ui_action(.Video_Frame_Generation)
 		ui_item_tooltip(ui, "Interpolate frames for smoother motion. Adds about 33 ms at 60 FPS or 67 ms at 30 FPS, with matching audio delay. Requires a sufficiently fast display.")
 		imgui.TextDisabledUnformatted(video_enhancement_text(e.status.fruc_state, e.status.fruc_reason))
-		if imgui.MenuItem("Game frame rate: 30 FPS", nil, e.preferences.game_30_fps) do post_ui_action(.Video_Game_30_FPS)
+		if imgui.MenuItem("Game frame rate: 30 FPS", nil, .Game_30_FPS in e.preferences) do post_ui_action(.Video_Game_30_FPS)
 		ui_item_tooltip(ui, "Use for 30 FPS games carried in a 60 FPS capture signal, including Switch 2. Frame generation samples at 30 FPS and targets 60 FPS even if repeated frames differ slightly. Off uses automatic detection. Only affects frame generation.")
 		if e.save_failed do imgui.TextDisabledUnformatted("Video preferences could not be saved")
 		imgui.EndMenu()
@@ -385,9 +385,9 @@ ui_item_tooltip :: proc(ui: ^ImGui_State, text: cstring) {
 }
 
 imgui_build_edid_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
-	status := EDID_Availability(sync.atomic_load_explicit(&r.edid.status, .Acquire))
-	known := sync.atomic_load_explicit(&r.edid.mode_known, .Acquire) != 0
-	current := EDID_Mode(sync.atomic_load_explicit(&r.edid.mode, .Relaxed))
+	status := sync.atomic_load_explicit(&r.edid.status, .Acquire)
+	known := sync.atomic_load_explicit(&r.edid.mode_known, .Relaxed) != 0
+	current := sync.atomic_load_explicit(&r.edid.mode, .Relaxed)
 	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 
 	Option :: struct {mode: EDID_Mode, tooltip: cstring}
@@ -410,8 +410,8 @@ imgui_build_edid_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
 }
 
 edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, mode: EDID_Mode) -> cstring {
-	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.error, .Relaxed))
-	notice := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.notice, .Relaxed))
+	error := sync.atomic_load_explicit(&r.edid.error, .Relaxed)
+	notice := sync.atomic_load_explicit(&r.edid.notice, .Relaxed)
 	switch status {
 	case .Reading: return "Reading mode..."
 	case .Applying: return "Applying mode..."
@@ -432,9 +432,9 @@ edid_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, m
 }
 
 imgui_build_color_range_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
-	status := EDID_Availability(sync.atomic_load_explicit(&r.edid.color_range_status, .Acquire))
-	known := sync.atomic_load_explicit(&r.edid.color_range_known, .Acquire) != 0
-	current := Color_Range(sync.atomic_load_explicit(&r.edid.color_range, .Relaxed))
+	status := sync.atomic_load_explicit(&r.edid.color_range_status, .Acquire)
+	known := sync.atomic_load_explicit(&r.edid.color_range_known, .Relaxed) != 0
+	current := sync.atomic_load_explicit(&r.edid.color_range, .Relaxed)
 	capture_ready := sync.atomic_load_explicit(&r.capture_ready, .Acquire) != 0
 
 	Option :: struct {range: Color_Range, tooltip: cstring}
@@ -457,7 +457,7 @@ imgui_build_color_range_menu :: proc(ui: ^ImGui_State, r: ^Renderer) {
 }
 
 color_range_status_text :: proc(r: ^Renderer, status: EDID_Availability, known: bool, range: Color_Range) -> cstring {
-	error := EDID_Protocol_Error(sync.atomic_load_explicit(&r.edid.color_range_error, .Relaxed))
+	error := sync.atomic_load_explicit(&r.edid.color_range_error, .Relaxed)
 	#partial switch status {
 	case .Reading: return "Reading setting..."
 	case .Applying: return "Applying setting..."
@@ -497,8 +497,8 @@ imgui_build_capture_health :: proc(r: ^Renderer) {
 	imgui.TextUnformatted(fmt.ctprintf("Capture: %.1f FPS", h.capture_fps))
 	imgui.TextUnformatted(fmt.ctprintf("Displayed: %.1f FPS", h.present_fps))
 	e := &r.enhancements
-	if e.preferences.super_resolution || e.preferences.frame_generation {
-		if e.status.fruc_state == .Active do imgui.TextUnformatted(fmt.ctprintf("Source cadence: %.2f FPS (%s)", e.status.source_hz, "30 FPS override" if e.preferences.game_30_fps else "automatic"))
+	if e.preferences & {.Super_Resolution, .Frame_Generation} != {} {
+		if e.status.fruc_state == .Active do imgui.TextUnformatted(fmt.ctprintf("Source cadence: %.2f FPS (%s)", e.status.source_hz, "30 FPS override" if .Game_30_FPS in e.preferences else "automatic"))
 		imgui.TextUnformatted(fmt.ctprintf("Enhanced output: %.1f original / %.1f generated FPS", e.original_fps, e.generated_fps))
 		imgui.TextUnformatted(fmt.ctprintf("Processing: %.2f ms / added delay: %.1f ms", e.status.processing_ms, f64(e.status.delay)/VIDEO_TICKS_PER_MS))
 		imgui.TextUnformatted(fmt.ctprintf("Enhancement misses: %d", e.status.missed))

@@ -5,29 +5,31 @@ import "core:path/filepath"
 import "core:testing"
 import "core:sync"
 
+VIDEO_PREFERENCES_ALL :: Video_Preferences{.Super_Resolution, .Frame_Generation, .Game_30_FPS}
+
 @(test)
 video_preferences_roundtrip_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, video_preferences_parse(""), Video_Preferences{})
 	testing.expect_value(t, video_preferences_parse("[audio]\nsuper_resolution=1\nframe_generation=1\ngame_30_fps=1"), Video_Preferences{})
 	testing.expect_value(t, video_preferences_parse("[video]\nsuper_resolution=invalid\nframe_generation=-1\ngame_30_fps=invalid"), Video_Preferences{})
-	testing.expect_value(t, video_preferences_parse("[video]\nframe_generation=1"), Video_Preferences{frame_generation = true})
+	testing.expect_value(t, video_preferences_parse("[video]\nframe_generation=1"), Video_Preferences{.Frame_Generation})
 	directory, err := os.make_directory_temp("", "elga-video-test-*", context.temp_allocator)
 	if !testing.expect(t, err == nil) do return
 	path, _ := filepath.join([]string{directory, "video.ini"}, context.temp_allocator)
 	temporary, _ := filepath.join([]string{directory, "video.tmp"}, context.temp_allocator)
 	defer { _ = os.remove(path); _ = os.remove(temporary); _ = os.remove(directory) }
 	for mask in 0..<8 {
-		p := Video_Preferences{mask&1 != 0, mask&2 != 0, mask&4 != 0}
+		p := transmute(Video_Preferences)u8(mask)
 		testing.expect(t, video_preferences_save_to(p, path, temporary))
 		data, read_error := os.read_entire_file(path, context.temp_allocator)
 		testing.expect(t, read_error == nil)
 		testing.expect_value(t, video_preferences_parse(string(data)), p)
 	}
 	// An invalid destination must not replace the last good preference file.
-	testing.expect(t, !video_preferences_save_to({true, true, true}, directory, temporary))
+	testing.expect(t, !video_preferences_save_to(VIDEO_PREFERENCES_ALL, directory, temporary))
 	data, read_error := os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, read_error == nil)
-	testing.expect_value(t, video_preferences_parse(string(data)), Video_Preferences{true, true, true})
+	testing.expect_value(t, video_preferences_parse(string(data)), VIDEO_PREFERENCES_ALL)
 }
 
 @(test)
@@ -43,19 +45,19 @@ video_optional_backend_and_abi_test :: proc(t: ^testing.T) {
 	testing.expect(t, !video_backend_valid({version = 1, size = size_of(Video_API)}))
 	testing.expect(t, !video_backend_valid({version = 2, size = size_of(Video_API)}))
 	r: Renderer
-	r.enhancements.preferences.game_30_fps = true
+	r.enhancements.preferences += {.Game_30_FPS}
 	// Both off must neither load a DLL nor allocate processing resources.
 	video_enhancements_prepare(&r)
 	testing.expect(t, !r.enhancements.load_attempted)
 	testing.expect(t, r.enhancements.session == nil && r.enhancements.timer == nil)
-	r.enhancements.preferences = {true, true, true}
+	r.enhancements.preferences = VIDEO_PREFERENCES_ALL
 	// Model an absent add-on without depending on what the developer installed.
 	r.enhancements.load_attempted = true
 	r.enhancements.caps = {vsr_reason = .Runtime, fruc_reason = .Runtime}
 	video_enhancements_prepare(&r)
 	testing.expect_value(t, r.enhancements.status.vsr_state, Video_Effect_State.Unavailable)
 	testing.expect_value(t, r.enhancements.status.fruc_state, Video_Effect_State.Unavailable)
-	testing.expect_value(t, r.enhancements.preferences, Video_Preferences{true, true, true})
+	testing.expect_value(t, r.enhancements.preferences, VIDEO_PREFERENCES_ALL)
 	r.enhancements.cached.generation = 10
 	r.enhancements.status.delay = 666667
 	video_enhancements_reset(&r)

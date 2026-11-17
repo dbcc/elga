@@ -114,8 +114,11 @@ EDID_Set_Disposition :: enum u32 {
 	May_Have_Applied,
 }
 
+// Every disposition in which the card may now hold a different mode.
+EDID_RECONNECT_DISPOSITIONS :: bit_set[EDID_Set_Disposition]{.Applied, .Applied_Mismatch, .May_Have_Applied}
+
 edid_requires_reconnect :: proc(disposition: EDID_Set_Disposition) -> bool {
-	return disposition == .Applied || disposition == .Applied_Mismatch || disposition == .May_Have_Applied
+	return disposition in EDID_RECONNECT_DISPOSITIONS
 }
 
 EDID_Result :: struct {
@@ -235,9 +238,8 @@ edid_encode_request :: proc(command: u32, input, packet: []u8) -> (int, EDID_Pro
 
 // Decodes a reply whose payload must fill output exactly.
 edid_decode_response :: proc(command: u32, response, output: []u8) -> EDID_Protocol_Error {
-	length, error := edid_decode_reply(command, response, output)
-	if error == .None && length != len(output) do return .Unexpected_Response_Length
-	return error
+	length := edid_decode_reply(command, response, output) or_return
+	return .None if length == len(output) else .Unexpected_Response_Length
 }
 
 // Decodes a reply payload of at most len(output) bytes and returns its length.
@@ -264,9 +266,8 @@ edid_command :: proc(
 	input: []u8,
 	output: []u8,
 ) -> EDID_Protocol_Error {
-	length, error := edid_command_reply(transport, command, input, output)
-	if error == .None && length != len(output) do return .Unexpected_Response_Length
-	return error
+	length := edid_command_reply(transport, command, input, output) or_return
+	return .None if length == len(output) else .Unexpected_Response_Length
 }
 
 // Properties 2 and 1 carry the outer frame's length and bytes respectively.
@@ -276,19 +277,16 @@ edid_command_reply :: proc(
 	command: u32,
 	input: []u8,
 	output: []u8,
-) -> (int, EDID_Protocol_Error) {
-	if len(output) > int(EDID_MAX_TRANSFER) {
-		return 0, .Response_Too_Large
-	}
+) -> (length: int, error: EDID_Protocol_Error) {
+	if len(output) > int(EDID_MAX_TRANSFER) do return 0, .Response_Too_Large
 	packet: [EDID_MAX_TRANSFER]u8
-	encoded_length, encode_error := edid_encode_request(command, input, packet[:])
-	if encode_error != .None do return 0, encode_error
-	packet_length := u16(encoded_length)
-	error := edid_property_write(transport, EDID_PROPERTY_LENGTH, &packet_length, size_of(packet_length))
-	if error == .Cancelled do return 0, error
-	if error != .None do return 0, .Length_Write_Failed
-	error = edid_property_write(transport, EDID_PROPERTY_DATA, &packet[0], u32(packet_length))
-	if error != .None do return 0, .Write_Failed
+	packet_length := u16(edid_encode_request(command, input, packet[:]) or_return)
+	#partial switch edid_property_write(transport, EDID_PROPERTY_LENGTH, &packet_length, size_of(packet_length)) {
+	case .None:
+	case .Cancelled: return 0, .Cancelled
+	case:            return 0, .Length_Write_Failed
+	}
+	if edid_property_write(transport, EDID_PROPERTY_DATA, &packet[0], u32(packet_length)) != .None do return 0, .Write_Failed
 
 	poll_limit := transport.poll_limit
 	if poll_limit == 0 do poll_limit = EDID_DEFAULT_POLL_LIMIT
@@ -326,10 +324,8 @@ edid_command_reply :: proc(
 
 edid_validate_protocol :: proc(transport: ^EDID_Transport) -> EDID_Protocol_Error {
 	response: [4]u8
-	error := edid_query_command(transport, EDID_COMMAND_PROTOCOL_VERSION, response[:])
-	if error != .None do return error
-	if response != ([4]u8{EDID_PROTOCOL_VERSION, 0, 0, 0}) do return .Protocol_Version
-	return .None
+	edid_query_command(transport, EDID_COMMAND_PROTOCOL_VERSION, response[:]) or_return
+	return .None if response == ([4]u8{EDID_PROTOCOL_VERSION, 0, 0, 0}) else .Protocol_Version
 }
 
 // The vendor read path makes three attempts. Retrying identification and GET
@@ -338,9 +334,8 @@ edid_validate_protocol :: proc(transport: ^EDID_Transport) -> EDID_Protocol_Erro
 // too: shortly after streaming starts, the card has answered a protocol query
 // with a frame that was not RTICE (64 04 F0 0C 06 00 00 00 00).
 edid_query_command :: proc(transport: ^EDID_Transport, command: u32, output: []u8) -> EDID_Protocol_Error {
-	length, error := edid_query_reply(transport, command, nil, output)
-	if error == .None && length != len(output) do return .Unexpected_Response_Length
-	return error
+	length := edid_query_reply(transport, command, nil, output) or_return
+	return .None if length == len(output) else .Unexpected_Response_Length
 }
 
 EDID_RETRYABLE_ERRORS :: bit_set[EDID_Protocol_Error]{
@@ -357,21 +352,20 @@ edid_query_reply :: proc(transport: ^EDID_Transport, command: u32, input, output
 	return
 }
 
-edid_read_mode :: proc(transport: ^EDID_Transport) -> (EDID_Mode, EDID_Protocol_Error) {
-	error := edid_validate_protocol(transport)
-	if error != .None do return .Internal, error
+// Every error returns the zero mode, Internal.
+edid_read_mode :: proc(transport: ^EDID_Transport) -> (mode: EDID_Mode, error: EDID_Protocol_Error) {
+	edid_validate_protocol(transport) or_return
 	response: [4]u8
-	error = edid_query_command(transport, EDID_COMMAND_GET_MODE, response[:])
-	if error != .None do return .Internal, error
+	edid_query_command(transport, EDID_COMMAND_GET_MODE, response[:]) or_return
 	if response[1] != 0 || response[2] != 0 || response[3] != 0 do return .Internal, .Unknown_Mode
-	mode, known := edid_mode_from_device(response[0])
-	if !known do return .Internal, .Unknown_Mode
+	known: bool
+	if mode, known = edid_mode_from_device(response[0]); !known do return .Internal, .Unknown_Mode
 	return mode, .None
 }
 
-edid_set_mode :: proc(transport: ^EDID_Transport, requested: EDID_Mode) -> (EDID_Mode, bool, EDID_Set_Disposition, EDID_Protocol_Error) {
-	current, error := edid_read_mode(transport)
-	if error != .None do return .Internal, false, .Not_Applied, error
+// A failed initial read returns the zero results: unknown Internal, Not_Applied.
+edid_set_mode :: proc(transport: ^EDID_Transport, requested: EDID_Mode) -> (mode: EDID_Mode, mode_known: bool, disposition: EDID_Set_Disposition, error: EDID_Protocol_Error) {
+	current := edid_read_mode(transport) or_return
 	if current == requested do return current, true, .Not_Applied, .None
 	// The little-endian u32 mode value.
 	payload := [4]u8{EDID_MODE_DEVICE_VALUE[requested], 0, 0, 0}
@@ -386,24 +380,22 @@ edid_set_mode :: proc(transport: ^EDID_Transport, requested: EDID_Mode) -> (EDID
 }
 
 // The vendor reads only the first reply byte; a wider reply is tolerated.
-edid_read_color_range :: proc(transport: ^EDID_Transport) -> (Color_Range, EDID_Protocol_Error) {
-	error := edid_validate_protocol(transport)
-	if error != .None do return .Auto, error
+// Every error returns the zero range, Auto.
+edid_read_color_range :: proc(transport: ^EDID_Transport) -> (range: Color_Range, error: EDID_Protocol_Error) {
+	edid_validate_protocol(transport) or_return
 	input := [1]u8{COLOR_RANGE_SELECTOR}
 	response: [4]u8
-	length: int
-	length, error = edid_query_reply(transport, EDID_COMMAND_GET_COLOR_RANGE, input[:], response[:])
-	if error != .None do return .Auto, error
+	length := edid_query_reply(transport, EDID_COMMAND_GET_COLOR_RANGE, input[:], response[:]) or_return
 	if length == 0 do return .Auto, .Unexpected_Response_Length
-	range, known := color_range_from_device(response[0])
-	if !known do return .Auto, .Unknown_Color_Range
+	known: bool
+	if range, known = color_range_from_device(response[0]); !known do return .Auto, .Unknown_Color_Range
 	return range, .None
 }
 
 // Mirrors edid_set_mode: one write, never retried, confirmed by a separate read.
-edid_set_color_range :: proc(transport: ^EDID_Transport, requested: Color_Range) -> (Color_Range, bool, EDID_Set_Disposition, EDID_Protocol_Error) {
-	current, error := edid_read_color_range(transport)
-	if error != .None do return .Auto, false, .Not_Applied, error
+// A failed initial read returns the zero results: unknown Auto, Not_Applied.
+edid_set_color_range :: proc(transport: ^EDID_Transport, requested: Color_Range) -> (range: Color_Range, range_known: bool, disposition: EDID_Set_Disposition, error: EDID_Protocol_Error) {
+	current := edid_read_color_range(transport) or_return
 	if current == requested do return current, true, .Not_Applied, .None
 	payload := [2]u8{COLOR_RANGE_SELECTOR, COLOR_RANGE_DEVICE_VALUE[requested]}
 	// The vendor ignores this reply's payload; only its framing is checked.

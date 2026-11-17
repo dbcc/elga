@@ -67,9 +67,10 @@ Screenshot_Job :: struct {
 }
 
 SCREENSHOT_READBACK_TIMEOUT :: 3*time.Second
+SCREENSHOT_BUSY :: bit_set[Screenshot_Status]{.Waiting, .Reading, .Saving}
 
 screenshot_busy :: proc(s: ^Screenshot_State) -> bool {
-	return s.status == .Waiting || s.status == .Reading || s.status == .Saving
+	return s.status in SCREENSHOT_BUSY
 }
 
 screenshot_status_text :: proc(s: ^Screenshot_State) -> cstring {

@@ -32,6 +32,25 @@ Capture_Format :: enum u8 {
 
 CAPTURE_FORMAT_COUNT :: len(Capture_Format)
 
+Capture_Formats :: bit_set[Capture_Format; u32]
+
+// Formats the D3D11 video processor accepts without a Windows transform.
+CAPTURE_GPU_FORMATS :: Capture_Formats{.NV12, .P010, .YUY2}
+// Formats uploaded as a full-size luma plane followed by half-height chroma.
+CAPTURE_PLANAR_FORMATS :: Capture_Formats{.NV12, .P010, .I420, .MJPEG}
+
+// Bytes per pixel of the first plane as uploaded: I420/MJPEG arrive as NV12,
+// RGB24 as 32-bit RGB.
+@(rodata)
+CAPTURE_FORMAT_UPLOAD_BYTES := [Capture_Format]u64{
+	.NV12  = 1,
+	.P010  = 2,
+	.YUY2  = 2,
+	.I420  = 1,
+	.RGB24 = 4,
+	.MJPEG = 1,
+}
+
 @(rodata)
 CAPTURE_FORMAT_NAME := [Capture_Format]cstring{
 	.NV12  = "NV12",
@@ -56,6 +75,13 @@ Video_Range :: enum u8 {
 	Unknown,
 	Full,
 	Limited,
+}
+
+@(rodata)
+VIDEO_RANGE_NAME := [Video_Range]string{
+	.Unknown = "unknown (limited fallback)",
+	.Full    = "full",
+	.Limited = "limited",
 }
 
 Source_Reader_Callback :: struct {
@@ -190,8 +216,8 @@ capture_start :: proc(r: ^Renderer) -> bool {
 	sync.atomic_store_explicit(&r.capture_refresh, 0, .Release)
 	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Release)
 	sync.atomic_store_explicit(&r.source_mode_count, 0, .Release)
-	sync.atomic_store_explicit(&r.capture_formats, 0, .Release)
-	sync.atomic_store_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Release)
+	sync.atomic_store_explicit(&r.capture_formats, Capture_Formats{}, .Release)
+	sync.atomic_store_explicit(&r.edid.request_kind, EDID_Request_Kind.None, .Release)
 	sync.atomic_store_explicit(&r.edid.operation_active, 0, .Release)
 	// The new generation makes any unhandled result stale. Leaving it pending
 	// would keep renderer_edid_busy true and lock the capture settings.
@@ -300,7 +326,7 @@ capture_thread_proc :: proc(t: ^thread.Thread) {
 	sync.atomic_store_explicit(&r.capture_ready, 1, .Release)
 	pipeline := "native GPU" if capture_format_is_gpu(mode.format) else "Media Foundation -> 32-bit RGB" if mode.format == .RGB24 else "Media Foundation -> NV12"
 	presentation := "D3D11 copy" if mode.format == .RGB24 else "D3D11 video processor"
-	fmt.eprintf("Capture ready: %dx%d @ %.3f FPS, %s, %s range (%s -> %s -> D3D11)\n", mode.width, mode.height, f64(mode.fps_num)/f64(mode.fps_den), CAPTURE_FORMAT_NAME[mode.format], video_range_name(mode.range), pipeline, presentation)
+	fmt.eprintf("Capture ready: %dx%d @ %.3f FPS, %s, %s range (%s -> %s -> D3D11)\n", mode.width, mode.height, f64(mode.fps_num)/f64(mode.fps_den), CAPTURE_FORMAT_NAME[mode.format], VIDEO_RANGE_NAME[mode.range], pipeline, presentation)
 	fmt.eprintf("Color metadata: matrix=%d\n", mode.yuv_matrix)
 	if !check(reader.ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nil, nil, nil, nil), "Media Foundation asynchronous ReadSample") do return
 	win32.PostMessageW(r.hwnd, CAPTURE_READY_MESSAGE, win32.WPARAM(generation), 0)
@@ -329,14 +355,15 @@ capture_service_edid_request :: proc(
 	callback: ^Source_Reader_Callback,
 	reader: ^IMFSourceReader,
 ) -> bool {
-	if sync.atomic_load_explicit(&r.edid.request_kind, .Acquire) == u32(EDID_Request_Kind.None) do return false
+	if sync.atomic_load_explicit(&r.edid.request_kind, .Acquire) == .None do return false
 	// Publish active before removing the mailbox entry so the UI never
 	// observes a false idle window between the two states.
 	sync.atomic_store_explicit(&r.edid.operation_active, 1, .Release)
-	kind := EDID_Request_Kind(sync.atomic_exchange_explicit(&r.edid.request_kind, u32(EDID_Request_Kind.None), .Acq_Rel))
+	kind := sync.atomic_exchange_explicit(&r.edid.request_kind, EDID_Request_Kind.None, .Acq_Rel)
+	// Acquiring request_kind makes the mailbox payload visible.
 	result := EDID_Result{
 		request_id = sync.atomic_load_explicit(&r.edid.request_id, .Acquire),
-		generation = sync.atomic_load_explicit(&r.edid.request_generation, .Acquire),
+		generation = sync.atomic_load_explicit(&r.edid.request_generation, .Relaxed),
 		kind = kind,
 	}
 	if result.generation != generation || !edid_available {
@@ -363,10 +390,10 @@ capture_service_edid_request :: proc(
 			}
 			result.color_range_known = result.color_range_error == .None
 		case .Set:
-			requested := EDID_Mode(sync.atomic_load_explicit(&r.edid.requested_mode, .Acquire))
+			requested := sync.atomic_load_explicit(&r.edid.requested_mode, .Relaxed)
 			result.mode, result.mode_known, result.disposition, result.error = edid_set_mode(transport, requested)
 		case .Set_Color_Range:
-			requested := Color_Range(sync.atomic_load_explicit(&r.edid.requested_color_range, .Acquire))
+			requested := sync.atomic_load_explicit(&r.edid.requested_color_range, .Relaxed)
 			result.color_range, result.color_range_known, result.color_range_disposition, result.color_range_error = edid_set_color_range(transport, requested)
 			if result.color_range_error != .None {
 				fmt.eprintf("Color range change result: request=%d error=%v disposition=%v\n", result.request_id, result.color_range_error, result.color_range_disposition)
@@ -484,10 +511,10 @@ capture_select_mode :: proc(reader: ^IMFSourceReader, reader_ex: ^IMFSourceReade
 capture_enumerate_modes :: proc(reader: ^IMFSourceReader, requested: Capture_Format, r: ^Renderer) -> int {
 	count := 0
 	source_count := 0
-	available: u32
+	available: Capture_Formats
 	sync.atomic_store_explicit(&r.capture_mode_count, 0, .Relaxed)
 	sync.atomic_store_explicit(&r.source_mode_count, 0, .Relaxed)
-	for index: u32 = 0; index < MAX_CAPTURE_MODES; index += 1 {
+	for index in u32(0)..<MAX_CAPTURE_MODES {
 		media_type: ^IMFMediaType
 		if failed(reader.GetNativeMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, index, &media_type)) do break
 		attributes := cast(^IMFAttributes)media_type
@@ -508,7 +535,7 @@ capture_enumerate_modes :: proc(reader: ^IMFSourceReader, requested: Capture_For
 			native_index = index,
 		}
 		if mode.height == 0 || mode.fps_num == 0 || mode.fps_den == 0 || u64(mode.width)*9 != u64(mode.height)*16 do continue
-		available |= u32(1) << u32(format)
+		available += {format}
 		if source_count >= len(r.source_modes) do continue
 		r.source_modes[source_count] = mode
 		source_count += 1
@@ -545,12 +572,11 @@ capture_format_from_guid :: proc(subtype: win32.GUID) -> (Capture_Format, bool) 
 }
 
 capture_format_is_gpu :: proc(format: Capture_Format) -> bool {
-	return format <= .YUY2
+	return format in CAPTURE_GPU_FORMATS
 }
 
 capture_format_available :: proc(r: ^Renderer, format: Capture_Format) -> bool {
-	available := sync.atomic_load_explicit(&r.capture_formats, .Acquire)
-	return available & (u32(1) << u32(format)) != 0
+	return format in sync.atomic_load_explicit(&r.capture_formats, .Acquire)
 }
 
 capture_resolution_available :: proc(r: ^Renderer, width, height: u32) -> bool {
@@ -605,15 +631,6 @@ capture_read_current_metadata :: proc(reader: ^IMFSourceReader, mode: ^Capture_M
 	}
 	if !failed(attributes.GetUINT32(attributes, &MF_MT_YUV_MATRIX, &yuv_matrix)) do mode.yuv_matrix = yuv_matrix
 	if !failed(attributes.GetUINT32(attributes, &MF_MT_DEFAULT_STRIDE, &stride)) do mode.stride = i32(stride)
-}
-
-video_range_name :: proc(video_range: Video_Range) -> string {
-	switch video_range {
-	case .Full: return "full"
-	case .Limited: return "limited"
-	case .Unknown: return "unknown (limited fallback)"
-	}
-	return "unknown"
 }
 
 mode_better :: proc(a, b: Capture_Mode, prefer_uhd_60 := false) -> bool {
@@ -718,7 +735,7 @@ capture_copy_texture :: proc(r: ^Renderer, texture: ^d3d11.ITexture2D, subresour
 	texture.GetDesc(texture, &desc)
 	if desc.MipLevels == 0 || u64(subresource) >= u64(desc.MipLevels)*u64(desc.ArraySize) do return false
 	mip := subresource%desc.MipLevels
-	if desc.Format != capture_format_dxgi(r.capture_format) ||
+	if desc.Format != CAPTURE_FORMAT_DXGI[r.capture_format] ||
 	   max(desc.Width>>mip, 1) < r.mode.width || max(desc.Height>>mip, 1) < r.mode.height {
 		return false
 	}
@@ -763,12 +780,10 @@ capture_process_uploaded_frame :: proc(r: ^Renderer) -> bool {
 
 capture_upload_pitch :: proc(format: Capture_Format, width, height: u32, stride: i32, length: u32) -> (u32, bool) {
 	if width == 0 || height == 0 do return 0, false
-	planar := format == .NV12 || format == .P010 || format == .I420 || format == .MJPEG
+	planar := format in CAPTURE_PLANAR_FORMATS
 	if planar && (width%2 != 0 || height%2 != 0 || stride < 0) do return 0, false
 	if format == .YUY2 && (width%2 != 0 || stride < 0) do return 0, false
-	row_bytes := u64(width)
-	if format == .P010 || format == .YUY2 do row_bytes *= 2
-	if format == .RGB24 do row_bytes *= 4
+	row_bytes := u64(width)*CAPTURE_FORMAT_UPLOAD_BYTES[format]
 	pitch := u64(abs(i64(stride))) if stride != 0 else row_bytes
 	rows := u64(height)
 	if planar do rows += u64(height)/2
